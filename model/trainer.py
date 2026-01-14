@@ -49,7 +49,8 @@ class Trainer:
         early_stopping_patience: int = 10,
         verbose: bool = True,
         auto_evaluate: bool = True,
-        test_loader: Optional[DataLoader] = None
+        test_loader: Optional[DataLoader] = None,
+        baseline_model_path: Optional[str] = None
     ):
         """
         初始化训练器
@@ -67,6 +68,7 @@ class Trainer:
             verbose: 是否打印详细信息
             auto_evaluate: 训练完成后是否自动评估（包含可视化）
             test_loader: 测试数据加载器（用于自动评估）
+            baseline_model_path: baseline模型路径（用于对比评估）
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -81,6 +83,7 @@ class Trainer:
         self.verbose = verbose
         self.auto_evaluate = auto_evaluate
         self.test_loader = test_loader
+        self.baseline_model_path = baseline_model_path
         
         # 训练状态
         self.current_epoch = 0
@@ -128,12 +131,12 @@ class Trainer:
         avg_loss = total_loss / num_batches
         return avg_loss
     
-    def validate(self) -> float:
+    def validate(self) -> tuple[float, float, float]:
         """
         验证
         
         Returns:
-            平均验证损失
+            (平均验证损失, 场景1 Ring3误差(px), 场景2 Ring3误差(px))
         """
         self.model.eval()
         total_loss = 0.0
@@ -146,18 +149,91 @@ class Trainer:
                 
                 outputs = self.model(inputs)
                 
-                # 计算损失（如果损失函数需要input_data，则传递）
+                # 计算损失
                 try:
                     loss = self.loss_fn(outputs, targets, inputs)
                 except TypeError:
-                    # 如果损失函数不接受input_data参数，使用普通调用
                     loss = self.loss_fn(outputs, targets)
                 
                 total_loss += loss.item()
                 num_batches += 1
         
         avg_loss = total_loss / num_batches
-        return avg_loss
+        
+        # 计算场景误差（使用简化的评估）
+        scenario1_error, scenario2_error = self._compute_scenario_errors()
+        
+        return avg_loss, scenario1_error, scenario2_error
+    
+    def _compute_scenario_errors(self) -> tuple[float, float]:
+        """
+        计算两个场景的Ring3圆心误差
+        
+        Returns:
+            (场景1误差(px), 场景2误差(px))
+        """
+        import json
+        from pathlib import Path
+        
+        # 读取验证集原始数据
+        data_dir = Path(__file__).parent.parent / "data" / "use"
+        val_data_path = data_dir / "val.json"
+        
+        with open(val_data_path, "r", encoding="utf-8") as f:
+            val_data = json.load(f)
+        
+        scenario1_errors = []
+        scenario2_errors = []
+        grid_size = 16384
+        
+        with torch.no_grad():
+            for item in val_data:
+                rings = item.get("rings", [])
+                if len(rings) < 3:
+                    continue
+                
+                # 归一化
+                ring1 = torch.tensor([
+                    rings[0]["x"] / grid_size,
+                    rings[0]["y"] / grid_size,
+                    rings[0]["r"] / grid_size
+                ], dtype=torch.float32).to(self.device)
+                
+                ring2_true = torch.tensor([
+                    rings[1]["x"] / grid_size,
+                    rings[1]["y"] / grid_size,
+                    rings[1]["r"] / grid_size
+                ], dtype=torch.float32).to(self.device)
+                
+                ring3_true = torch.tensor([
+                    rings[2]["x"] / grid_size,
+                    rings[2]["y"] / grid_size,
+                    rings[2]["r"] / grid_size
+                ], dtype=torch.float32)
+                
+                # 场景1：只给Ring1，预测Ring2再预测Ring3
+                input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
+                ring2_pred = self.model(input1).squeeze(0)
+                
+                input2 = torch.cat([ring1, ring2_pred]).unsqueeze(0)
+                ring3_pred_s1 = self.model(input2).squeeze(0).cpu()
+                
+                # 计算场景1的Ring3误差
+                center_error_s1 = torch.sqrt(((ring3_pred_s1[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
+                scenario1_errors.append(center_error_s1)
+                
+                # 场景2：给Ring1+Ring2，预测Ring3
+                input3 = torch.cat([ring1, ring2_true]).unsqueeze(0)
+                ring3_pred_s2 = self.model(input3).squeeze(0).cpu()
+                
+                # 计算场景2的Ring3误差
+                center_error_s2 = torch.sqrt(((ring3_pred_s2[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
+                scenario2_errors.append(center_error_s2)
+        
+        avg_s1 = sum(scenario1_errors) / len(scenario1_errors) if scenario1_errors else 0
+        avg_s2 = sum(scenario2_errors) / len(scenario2_errors) if scenario2_errors else 0
+        
+        return avg_s1, avg_s2
     
     def train(self, num_epochs: int) -> Dict[str, list]:
         """
@@ -175,6 +251,11 @@ class Trainer:
             print(f"验证样本: {len(self.val_loader.dataset)}")
             print(f"{'='*60}\n")
         
+        # 创建训练日志文件
+        log_file = self.save_dir / "training_log.txt"
+        with open(log_file, "w", encoding="utf-8") as f:
+            f.write("Epoch\tTrain\tVal\tR3(S1)\tR3(S2)\tBest\n")
+        
         for epoch in range(num_epochs):
             self.current_epoch = epoch + 1
             start_time = time.time()
@@ -183,7 +264,7 @@ class Trainer:
             train_loss = self.train_epoch()
             
             # 验证
-            val_loss = self.validate()
+            val_loss, scenario1_error, scenario2_error = self.validate()
             
             # 学习率调度
             if self.scheduler is not None:
@@ -195,34 +276,41 @@ class Trainer:
             current_lr = self.optimizer.param_groups[0]["lr"]
             self.history["lr"].append(current_lr)
             
-            # 打印信息
-            epoch_time = time.time() - start_time
-            if self.verbose:
-                print(f"Epoch {self.current_epoch}/{num_epochs} | "
-                      f"Train Loss: {train_loss:.6f} | "
-                      f"Val Loss: {val_loss:.6f} | "
-                      f"LR: {current_lr:.6f} | "
-                      f"Time: {epoch_time:.2f}s")
-            
             # 保存最佳模型
+            is_best = False
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
                 self.patience_counter = 0
                 self.save_checkpoint("best_model.pth")
-                if self.verbose:
-                    print(f"  → 保存最佳模型 (val_loss: {val_loss:.6f})")
+                is_best = True
             else:
                 self.patience_counter += 1
+            
+            # 打印信息
+            if self.verbose:
+                best_mark = " ✓" if is_best else ""
+                print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
+                      f"Train: {train_loss:.6f}\t"
+                      f"Val: {val_loss:.6f}\t"
+                      f"R3(S1): {scenario1_error:4.0f}px\t"
+                      f"R3(S2): {scenario2_error:4.0f}px"
+                      f"{best_mark}")
+            
+            # 写入日志
+            with open(log_file, "a", encoding="utf-8") as f:
+                best_mark = "✓" if is_best else ""
+                f.write(f"{self.current_epoch:3d}\t"
+                       f"{train_loss:.6f}\t"
+                       f"{val_loss:.6f}\t"
+                       f"{scenario1_error:4.0f}\t"
+                       f"{scenario2_error:4.0f}\t"
+                       f"{best_mark}\n")
             
             # 早停
             if self.patience_counter >= self.early_stopping_patience:
                 if self.verbose:
                     print(f"\n早停触发 - {self.early_stopping_patience} 个 epoch 无改善")
                 break
-            
-            # 定期保存检查点
-            if (self.current_epoch) % 10 == 0:
-                self.save_checkpoint(f"checkpoint_epoch_{self.current_epoch}.pth")
         
         if self.verbose:
             print(f"\n{'='*60}")
@@ -252,8 +340,12 @@ class Trainer:
         # 导入评估器
         from model.evaluator import Evaluator
         
-        # 创建评估器
-        evaluator = Evaluator(self.model, device=self.device)
+        # 创建评估器（传入baseline路径）
+        evaluator = Evaluator(
+            self.model, 
+            device=self.device,
+            baseline_model_path=self.baseline_model_path
+        )
         
         # 评估
         if self.verbose:

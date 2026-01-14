@@ -83,7 +83,7 @@ class BaseModel(nn.Module, ABC):
         Path(path).parent.mkdir(parents=True, exist_ok=True)
         
         torch.save(checkpoint, path)
-        print(f"模型已保存到: {path}")
+        # print(f"模型已保存到: {path}")  # 静默保存，避免输出混乱
     
     def load_checkpoint(
         self, 
