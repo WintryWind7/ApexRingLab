@@ -26,13 +26,18 @@ class RingDataset(Dataset):
     生成 2 个训练样本：
     - 样本 1: input=ring1 (3,) → target=ring2 (3,)
     - 样本 2: input=ring1+ring2 (6,) → target=ring3 (3,)
+    
+    支持两种坐标模式：
+    - 'absolute': 全绝对坐标（原始方案）
+    - 'relative': Ring1绝对 + Ring2相对Ring1 + Ring3相对Ring2（默认）
     """
     
     def __init__(
         self,
         split: Literal["train", "val", "test"] = "train",
         data_dir: Path = DATA_DIR,
-        normalize: bool = True
+        normalize: bool = True,
+        coordinate_mode: Literal["absolute", "relative"] = "relative"
     ):
         """
         初始化数据集
@@ -41,10 +46,12 @@ class RingDataset(Dataset):
             split: 数据集分割 (train/val/test)
             data_dir: 数据目录（Path对象）
             normalize: 是否归一化坐标
+            coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         """
         self.split = split
         self.normalize = normalize
         self.grid_size = GRID_SIZE
+        self.coordinate_mode = coordinate_mode
         
         # 加载数据
         data_path = Path(data_dir) / f"{split}.json"
@@ -54,7 +61,7 @@ class RingDataset(Dataset):
         # 生成训练样本
         self.samples = self._generate_samples()
         
-        print(f"加载 {split} 数据集: {len(self.raw_data)} 条原始数据 → {len(self.samples)} 个训练样本")
+        print(f"加载 {split} 数据集 ({coordinate_mode}): {len(self.raw_data)} 条原始数据 → {len(self.samples)} 个训练样本")
     
     def _generate_samples(self) -> List[Tuple[List[float], List[float]]]:
         """
@@ -77,21 +84,49 @@ class RingDataset(Dataset):
                 continue
             
             # 提取坐标
-            ring1 = [rings[0]["x"], rings[0]["y"], rings[0]["r"]]
-            ring2 = [rings[1]["x"], rings[1]["y"], rings[1]["r"]]
-            ring3 = [rings[2]["x"], rings[2]["y"], rings[2]["r"]]
+            x1, y1, r1 = rings[0]["x"], rings[0]["y"], rings[0]["r"]
+            x2, y2, r2 = rings[1]["x"], rings[1]["y"], rings[1]["r"]
+            x3, y3, r3 = rings[2]["x"], rings[2]["y"], rings[2]["r"]
             
             # 归一化
             if self.normalize:
-                ring1 = [v / self.grid_size for v in ring1]
-                ring2 = [v / self.grid_size for v in ring2]
-                ring3 = [v / self.grid_size for v in ring3]
+                x1, y1, r1 = x1 / self.grid_size, y1 / self.grid_size, r1 / self.grid_size
+                x2, y2, r2 = x2 / self.grid_size, y2 / self.grid_size, r2 / self.grid_size
+                x3, y3, r3 = x3 / self.grid_size, y3 / self.grid_size, r3 / self.grid_size
             
-            # 样本 1: ring1 → ring2
-            samples.append((ring1, ring2))
+            if self.coordinate_mode == "absolute":
+                # 绝对坐标模式（原始方案）
+                ring1 = [x1, y1, r1]
+                ring2 = [x2, y2, r2]
+                ring3 = [x3, y3, r3]
+                
+                # 样本 1: ring1 → ring2
+                samples.append((ring1, ring2))
+                
+                # 样本 2: ring1+ring2 → ring3
+                samples.append((ring1 + ring2, ring3))
             
-            # 样本 2: ring1+ring2 → ring3
-            samples.append((ring1 + ring2, ring3))
+            elif self.coordinate_mode == "relative":
+                # 相对坐标模式
+                # Ring1绝对，Ring2相对Ring1，Ring3相对Ring2
+                
+                # 计算相对坐标
+                dx2, dy2 = x2 - x1, y2 - y1  # Ring2相对Ring1
+                dx3, dy3 = x3 - x2, y3 - y2  # Ring3相对Ring2
+                
+                # 样本 1: ring1 → ring2 (相对坐标)
+                # 输入: [x1, y1, r1, 0, 0, 0]
+                # 输出: [dx2, dy2, r2]
+                input1 = [x1, y1, r1, 0, 0, 0]
+                target1 = [dx2, dy2, r2]
+                samples.append((input1, target1))
+                
+                # 样本 2: ring1 + ring2 → ring3 (相对坐标)
+                # 输入: [x1, y1, r1, dx2, dy2, r2]
+                # 输出: [dx3, dy3, r3]
+                input2 = [x1, y1, r1, dx2, dy2, r2]
+                target2 = [dx3, dy3, r3]
+                samples.append((input2, target2))
         
         return samples
     
@@ -156,6 +191,7 @@ def get_dataloader(
     batch_size: int = 32,
     shuffle: bool = None,
     num_workers: int = 0,
+    coordinate_mode: Literal["absolute", "relative"] = "relative",
     **kwargs
 ) -> DataLoader:
     """
@@ -166,6 +202,7 @@ def get_dataloader(
         batch_size: 批次大小
         shuffle: 是否打乱，默认 train=True, val/test=False
         num_workers: 数据加载线程数
+        coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         **kwargs: 其他 DataLoader 参数
         
     Returns:
@@ -175,7 +212,7 @@ def get_dataloader(
     if shuffle is None:
         shuffle = (split == "train")
     
-    dataset = RingDataset(split=split)
+    dataset = RingDataset(split=split, coordinate_mode=coordinate_mode)
     
     dataloader = DataLoader(
         dataset,

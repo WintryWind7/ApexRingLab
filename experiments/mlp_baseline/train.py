@@ -25,19 +25,20 @@ def train_baseline():
     """训练 baseline 模型"""
     
     print("="*70)
-    print("MLP Baseline 实验")
+    print("MLP Baseline 实验 (相对坐标)")
     print("="*70)
     
     # 超参数
     batch_size = 32
     learning_rate = 0.001
     num_epochs = 100
+    coordinate_mode = "relative"  # 使用相对坐标模式
     
     # 数据加载
     print("\n加载数据...")
-    train_loader = get_dataloader("train", batch_size=batch_size, shuffle=True)
-    val_loader = get_dataloader("val", batch_size=batch_size, shuffle=False)
-    test_loader = get_dataloader("test", batch_size=batch_size, shuffle=False)
+    train_loader = get_dataloader("train", batch_size=batch_size, shuffle=True, coordinate_mode=coordinate_mode)
+    val_loader = get_dataloader("val", batch_size=batch_size, shuffle=False, coordinate_mode=coordinate_mode)
+    test_loader = get_dataloader("test", batch_size=batch_size, shuffle=False, coordinate_mode=coordinate_mode)
     
     # 创建模型
     print("创建模型...")
@@ -65,7 +66,8 @@ def train_baseline():
         early_stopping_patience=20,
         verbose=True,
         auto_evaluate=True,
-        test_loader=test_loader
+        test_loader=test_loader,
+        coordinate_mode=coordinate_mode
     )
     
     # 训练
