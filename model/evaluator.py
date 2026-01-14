@@ -46,7 +46,8 @@ class Evaluator:
         data_dir: Path = DATA_DIR,
         test_rings_dir: Path = TEST_RINGS_DIR,
         map_dir: Path = MAP_DIR,
-        baseline_model_path: Optional[str] = None
+        baseline_model_path: Optional[str] = None,
+        coordinate_mode: str = "relative"
     ):
         """
         初始化评估器
@@ -58,6 +59,7 @@ class Evaluator:
             test_rings_dir: 测试样本目录（Path对象）
             map_dir: 地图目录（Path对象）
             baseline_model_path: baseline模型路径（可选），用于对比评估
+            coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         """
         self.model = model.to(device)
         self.device = device
@@ -67,6 +69,7 @@ class Evaluator:
         self.grid_size = GRID_SIZE
         self.baseline_model_path = baseline_model_path
         self.baseline_metrics = None
+        self.coordinate_mode = coordinate_mode
         
         # 如果提供了baseline路径，加载并评估baseline
         if baseline_model_path:
@@ -77,15 +80,15 @@ class Evaluator:
         加载baseline模型并评估，保存结果用于对比
         """
         from model.dataset import get_dataloader
+        from experiments.mlp_baseline.mlp_baseline import MLPBaseline
         
         print(f"\n加载baseline模型用于对比: {self.baseline_model_path}")
         
         # 保存当前模型
         current_model = self.model
         
-        # 加载baseline模型（需要知道模型类）
-        # 这里假设baseline模型和当前模型是同一个类
-        baseline_model = current_model.__class__()
+        # 加载baseline模型（固定使用MLPBaseline类）
+        baseline_model = MLPBaseline()
         baseline_model.load_checkpoint(self.baseline_model_path)
         baseline_model = baseline_model.to(self.device)
         
@@ -145,47 +148,92 @@ class Evaluator:
                 map_name = item.get("map", "unknown")
                 
                 # 提取并归一化坐标
-                ring1 = torch.tensor([
-                    rings[0]["x"] / self.grid_size,
-                    rings[0]["y"] / self.grid_size,
-                    rings[0]["r"] / self.grid_size
-                ], dtype=torch.float32).to(self.device)
+                x1, y1, r1 = rings[0]["x"] / self.grid_size, rings[0]["y"] / self.grid_size, rings[0]["r"] / self.grid_size
+                x2, y2, r2 = rings[1]["x"] / self.grid_size, rings[1]["y"] / self.grid_size, rings[1]["r"] / self.grid_size
+                x3, y3, r3 = rings[2]["x"] / self.grid_size, rings[2]["y"] / self.grid_size, rings[2]["r"] / self.grid_size
                 
-                ring2_true = torch.tensor([
-                    rings[1]["x"] / self.grid_size,
-                    rings[1]["y"] / self.grid_size,
-                    rings[1]["r"] / self.grid_size
-                ], dtype=torch.float32)
+                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
                 
-                ring3_true = torch.tensor([
-                    rings[2]["x"] / self.grid_size,
-                    rings[2]["y"] / self.grid_size,
-                    rings[2]["r"] / self.grid_size
-                ], dtype=torch.float32)
+                if self.coordinate_mode == "absolute":
+                    # 绝对坐标模式
+                    ring2_true = torch.tensor([x2, y2, r2], dtype=torch.float32)
+                    ring3_true = torch.tensor([x3, y3, r3], dtype=torch.float32)
+                    
+                    # 场景1：只提供Ring1
+                    # 预测Ring2
+                    input_ring1 = torch.cat([ring1, torch.zeros(3).to(self.device)])
+                    ring2_pred = self.model(input_ring1.unsqueeze(0)).squeeze(0).cpu()
+                    
+                    scenario1_ring2_preds.append(ring2_pred)
+                    scenario1_ring2_targets.append(ring2_true)
+                    scenario1_maps.append(map_name)
+                    
+                    # 预测Ring3（使用预测的Ring2）
+                    input_ring1_ring2_pred = torch.cat([ring1, ring2_pred.to(self.device)])
+                    ring3_pred_from_pred = self.model(input_ring1_ring2_pred.unsqueeze(0)).squeeze(0).cpu()
+                    
+                    scenario1_ring3_preds.append(ring3_pred_from_pred)
+                    scenario1_ring3_targets.append(ring3_true)
+                    
+                    # 场景2：提供Ring1+真实Ring2
+                    input_ring1_ring2_true = torch.cat([ring1, ring2_true.to(self.device)])
+                    ring3_pred_from_true = self.model(input_ring1_ring2_true.unsqueeze(0)).squeeze(0).cpu()
+                    
+                    scenario2_ring3_preds.append(ring3_pred_from_true)
+                    scenario2_ring3_targets.append(ring3_true)
+                    scenario2_maps.append(map_name)
                 
-                # 场景1：只提供Ring1
-                # 预测Ring2
-                input_ring1 = torch.cat([ring1, torch.zeros(3).to(self.device)])  # padding到6维
-                ring2_pred = self.model(input_ring1.unsqueeze(0)).squeeze(0).cpu()
-                
-                scenario1_ring2_preds.append(ring2_pred)
-                scenario1_ring2_targets.append(ring2_true)
-                scenario1_maps.append(map_name)
-                
-                # 预测Ring3（使用预测的Ring2）
-                input_ring1_ring2_pred = torch.cat([ring1, ring2_pred.to(self.device)])
-                ring3_pred_from_pred = self.model(input_ring1_ring2_pred.unsqueeze(0)).squeeze(0).cpu()
-                
-                scenario1_ring3_preds.append(ring3_pred_from_pred)
-                scenario1_ring3_targets.append(ring3_true)
-                
-                # 场景2：提供Ring1+真实Ring2
-                input_ring1_ring2_true = torch.cat([ring1, ring2_true.to(self.device)])
-                ring3_pred_from_true = self.model(input_ring1_ring2_true.unsqueeze(0)).squeeze(0).cpu()
-                
-                scenario2_ring3_preds.append(ring3_pred_from_true)
-                scenario2_ring3_targets.append(ring3_true)
-                scenario2_maps.append(map_name)
+                elif self.coordinate_mode == "relative":
+                    # 相对坐标模式
+                    # 场景1：只提供Ring1
+                    # 预测Ring2（相对坐标）
+                    input_ring1 = torch.cat([ring1, torch.zeros(3).to(self.device)])
+                    ring2_pred_rel = self.model(input_ring1.unsqueeze(0)).squeeze(0).cpu()  # [dx2, dy2, r2]
+                    
+                    # 转换为绝对坐标用于评估
+                    ring2_pred_abs = torch.tensor([
+                        x1 + ring2_pred_rel[0].item(),
+                        y1 + ring2_pred_rel[1].item(),
+                        ring2_pred_rel[2].item()
+                    ])
+                    ring2_true_abs = torch.tensor([x2, y2, r2])
+                    
+                    scenario1_ring2_preds.append(ring2_pred_abs)
+                    scenario1_ring2_targets.append(ring2_true_abs)
+                    scenario1_maps.append(map_name)
+                    
+                    # 预测Ring3（相对Ring2）
+                    input_ring1_ring2_pred = torch.cat([ring1, ring2_pred_rel.to(self.device)])
+                    ring3_pred_rel = self.model(input_ring1_ring2_pred.unsqueeze(0)).squeeze(0).cpu()  # [dx3, dy3, r3] 相对Ring2
+                    
+                    # 转换为绝对坐标
+                    ring3_pred_abs = torch.tensor([
+                        ring2_pred_abs[0] + ring3_pred_rel[0].item(),
+                        ring2_pred_abs[1] + ring3_pred_rel[1].item(),
+                        ring3_pred_rel[2].item()
+                    ])
+                    ring3_true_abs = torch.tensor([x3, y3, r3])
+                    
+                    scenario1_ring3_preds.append(ring3_pred_abs)
+                    scenario1_ring3_targets.append(ring3_true_abs)
+                    
+                    # 场景2：提供Ring1+真实Ring2
+                    dx2_true, dy2_true = x2 - x1, y2 - y1
+                    ring2_true_rel = torch.tensor([dx2_true, dy2_true, r2], dtype=torch.float32).to(self.device)
+                    
+                    input_ring1_ring2_true = torch.cat([ring1, ring2_true_rel])
+                    ring3_pred_rel_s2 = self.model(input_ring1_ring2_true.unsqueeze(0)).squeeze(0).cpu()  # [dx3, dy3, r3] 相对Ring2
+                    
+                    # 转换为绝对坐标
+                    ring3_pred_abs_s2 = torch.tensor([
+                        x2 + ring3_pred_rel_s2[0].item(),
+                        y2 + ring3_pred_rel_s2[1].item(),
+                        ring3_pred_rel_s2[2].item()
+                    ])
+                    
+                    scenario2_ring3_preds.append(ring3_pred_abs_s2)
+                    scenario2_ring3_targets.append(ring3_true_abs)
+                    scenario2_maps.append(map_name)
         
         # 转换为张量
         scenario1_ring2_preds = torch.stack(scenario1_ring2_preds)
@@ -400,24 +448,32 @@ class Evaluator:
             ring1: Ring1 数据
             
         Returns:
-            pred_ring2
+            pred_ring2 (绝对坐标)
         """
         self.model.eval()
         
         # 归一化
-        r1 = [ring1["x"] / self.grid_size, ring1["y"] / self.grid_size, ring1["r"] / self.grid_size]
+        x1, y1, r1 = ring1["x"] / self.grid_size, ring1["y"] / self.grid_size, ring1["r"] / self.grid_size
         
         with torch.no_grad():
             # 预测 Ring2（输入padding到6维）
-            input1 = torch.tensor(r1 + [0, 0, 0], dtype=torch.float32).unsqueeze(0).to(self.device)
+            input1 = torch.tensor([x1, y1, r1, 0, 0, 0], dtype=torch.float32).unsqueeze(0).to(self.device)
             output1 = self.model(input1).cpu().numpy()[0]
         
-        # 反归一化
-        pred_ring2 = {
-            "x": int(output1[0] * self.grid_size),
-            "y": int(output1[1] * self.grid_size),
-            "r": int(output1[2] * self.grid_size)
-        }
+        if self.coordinate_mode == "absolute":
+            # 绝对坐标模式
+            pred_ring2 = {
+                "x": int(output1[0] * self.grid_size),
+                "y": int(output1[1] * self.grid_size),
+                "r": int(output1[2] * self.grid_size)
+            }
+        elif self.coordinate_mode == "relative":
+            # 相对坐标模式，转换为绝对坐标
+            pred_ring2 = {
+                "x": int((x1 + output1[0]) * self.grid_size),
+                "y": int((y1 + output1[1]) * self.grid_size),
+                "r": int(output1[2] * self.grid_size)
+            }
         
         return pred_ring2
     
@@ -430,29 +486,43 @@ class Evaluator:
         预测 Ring3
         
         Args:
-            ring1: Ring1 数据
-            ring2: Ring2 数据（可以是真实值或预测值）
+            ring1: Ring1 数据（绝对坐标）
+            ring2: Ring2 数据（绝对坐标，可以是真实值或预测值）
             
         Returns:
-            pred_ring3
+            pred_ring3 (绝对坐标)
         """
         self.model.eval()
         
         # 归一化
-        r1 = [ring1["x"] / self.grid_size, ring1["y"] / self.grid_size, ring1["r"] / self.grid_size]
-        r2 = [ring2["x"] / self.grid_size, ring2["y"] / self.grid_size, ring2["r"] / self.grid_size]
+        x1, y1, r1 = ring1["x"] / self.grid_size, ring1["y"] / self.grid_size, ring1["r"] / self.grid_size
+        x2, y2, r2 = ring2["x"] / self.grid_size, ring2["y"] / self.grid_size, ring2["r"] / self.grid_size
         
         with torch.no_grad():
-            # 预测 Ring3
-            input2 = torch.tensor(r1 + r2, dtype=torch.float32).unsqueeze(0).to(self.device)
-            output2 = self.model(input2).cpu().numpy()[0]
-        
-        # 反归一化
-        pred_ring3 = {
-            "x": int(output2[0] * self.grid_size),
-            "y": int(output2[1] * self.grid_size),
-            "r": int(output2[2] * self.grid_size)
-        }
+            if self.coordinate_mode == "absolute":
+                # 绝对坐标模式
+                input2 = torch.tensor([x1, y1, r1, x2, y2, r2], dtype=torch.float32).unsqueeze(0).to(self.device)
+                output2 = self.model(input2).cpu().numpy()[0]
+                
+                pred_ring3 = {
+                    "x": int(output2[0] * self.grid_size),
+                    "y": int(output2[1] * self.grid_size),
+                    "r": int(output2[2] * self.grid_size)
+                }
+            
+            elif self.coordinate_mode == "relative":
+                # 相对坐标模式
+                # Ring2相对Ring1
+                dx2, dy2 = x2 - x1, y2 - y1
+                input2 = torch.tensor([x1, y1, r1, dx2, dy2, r2], dtype=torch.float32).unsqueeze(0).to(self.device)
+                output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3, r3] 相对Ring2
+                
+                # 转换为绝对坐标
+                pred_ring3 = {
+                    "x": int((x2 + output2[0]) * self.grid_size),
+                    "y": int((y2 + output2[1]) * self.grid_size),
+                    "r": int(output2[2] * self.grid_size)
+                }
         
         return pred_ring3
     
