@@ -9,11 +9,14 @@ import cv2
 import numpy as np
 
 # ==================== 配置区域 ====================
+# 获取项目根目录（prepare_data.py在utils/目录下，需要向上一级）
+PROJECT_ROOT = Path(__file__).parent.parent
+
 # 输入文件
-INPUT_FILE = "data/crawler/public_rings.jsonl"
+INPUT_FILE = PROJECT_ROOT / "data" / "crawler" / "public_rings.jsonl"
 
 # 输出目录
-OUTPUT_DIR = "data/use"
+OUTPUT_DIR = PROJECT_ROOT / "data" / "use"
 
 # 数据集分割比例
 TRAIN_RATIO = 0.7  # 训练集 70%
@@ -33,9 +36,9 @@ MAP_SUFFIXES_TO_REMOVE = [
 
 # 地图文件路径映射
 MAP_FILES = {
-    "mp_rr_desertlands_hu": "data/map/mp_rr_desertlands_hu.png",
-    "mp_rr_district": "data/map/mp_rr_district.png",
-    "mp_rr_tropic": "data/map/mp_rr_tropic_island_mu2.png",
+    "mp_rr_desertlands_hu": PROJECT_ROOT / "data" / "map" / "mp_rr_desertlands_hu.png",
+    "mp_rr_district": PROJECT_ROOT / "data" / "map" / "mp_rr_district.png",
+    "mp_rr_tropic": PROJECT_ROOT / "data" / "map" / "mp_rr_tropic_island_mu2.png",
 }
 
 # 地图名简称映射
@@ -290,7 +293,6 @@ def draw_rings_on_map(
 def generate_test_samples(
     test_data: List[Dict[str, Any]],
     output_dir: Path,
-    project_root: Path,
     samples_per_map: int = TEST_SAMPLES_PER_MAP,
     random_seed: int = RANDOM_SEED
 ) -> None:
@@ -300,7 +302,6 @@ def generate_test_samples(
     Args:
         test_data: 测试集数据
         output_dir: 输出目录
-        project_root: 项目根目录
         samples_per_map: 每个地图抽取的样本数
         random_seed: 随机种子
     """
@@ -337,12 +338,11 @@ def generate_test_samples(
         print(f"\n  {map_name}: 抽取 {sample_count} 个样本")
         
         # 获取地图文件路径
-        map_file = MAP_FILES.get(map_name)
-        if not map_file:
+        map_path = MAP_FILES.get(map_name)
+        if not map_path:
             print(f"    ✗ 未找到地图文件配置")
             continue
         
-        map_path = project_root / map_file
         if not map_path.exists():
             print(f"    ✗ 地图文件不存在: {map_path}")
             continue
@@ -422,8 +422,8 @@ def split_dataset(
 
 
 def prepare_dataset(
-    input_file: str = INPUT_FILE,
-    output_dir: str = OUTPUT_DIR,
+    input_file: Path = INPUT_FILE,
+    output_dir: Path = OUTPUT_DIR,
     train_ratio: float = TRAIN_RATIO,
     val_ratio: float = VAL_RATIO,
     test_ratio: float = TEST_RATIO,
@@ -440,26 +440,21 @@ def prepare_dataset(
         test_ratio: 测试集比例
         random_seed: 随机种子
     """
-    # 获取项目根目录
-    project_root = Path(__file__).parent.parent
-    input_path = project_root / input_file
-    output_path = project_root / output_dir
-    
     # 检查输入文件
-    if not input_path.exists():
-        print(f"✗ 输入文件不存在: {input_path}")
+    if not input_file.exists():
+        print(f"✗ 输入文件不存在: {input_file}")
         return
     
     # 创建输出目录
-    output_path.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     # 清空旧文件
-    for old_file in output_path.glob("*.json"):
+    for old_file in output_dir.glob("*.json"):
         old_file.unlink()
     
     # 加载数据
-    print(f"正在加载数据: {input_path}")
-    data = load_jsonl(input_path)
+    print(f"正在加载数据: {input_file}")
+    data = load_jsonl(input_file)
     print(f"✓ 加载完成，共 {len(data)} 条数据")
     
     # 标准化地图名
@@ -485,14 +480,14 @@ def prepare_dataset(
     print(f"  测试集: {len(test_data)} 条")
     
     # 保存数据集
-    print(f"\n正在保存数据集到: {output_path}")
-    save_json(train_data, output_path / "train.json")
-    save_json(val_data, output_path / "val.json")
-    save_json(test_data, output_path / "test.json")
+    print(f"\n正在保存数据集到: {output_dir}")
+    save_json(train_data, output_dir / "train.json")
+    save_json(val_data, output_dir / "val.json")
+    save_json(test_data, output_dir / "test.json")
     print(f"✓ 保存完成")
     
     # 生成测试样本
-    generate_test_samples(test_data, output_path, project_root)
+    generate_test_samples(test_data, output_dir)
 
 
 if __name__ == "__main__":
