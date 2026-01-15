@@ -48,10 +48,9 @@ class Trainer:
         save_dir: str = "checkpoints",
         early_stopping_patience: int = 10,
         verbose: bool = True,
-        auto_evaluate: bool = True,
-        test_loader: Optional[DataLoader] = None,
-        baseline_model_path: Optional[str] = None,
-        coordinate_mode: str = "relative"
+        coordinate_mode: str = "relative",
+        map_filter: Optional[str] = None,
+        use_onehot: bool = False
     ):
         """
         初始化训练器
@@ -67,10 +66,9 @@ class Trainer:
             save_dir: 检查点保存目录
             early_stopping_patience: 早停耐心值
             verbose: 是否打印详细信息
-            auto_evaluate: 训练完成后是否自动评估（包含可视化）
-            test_loader: 测试数据加载器（用于自动评估）
-            baseline_model_path: baseline模型路径（用于对比评估）
             coordinate_mode: 坐标模式 ('absolute' 或 'relative')
+            map_filter: 地图过滤器（用于分地图模型验证）
+            use_onehot: 是否使用One-Hot地图编码
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -83,10 +81,9 @@ class Trainer:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.early_stopping_patience = early_stopping_patience
         self.verbose = verbose
-        self.auto_evaluate = auto_evaluate
-        self.test_loader = test_loader
-        self.baseline_model_path = baseline_model_path
         self.coordinate_mode = coordinate_mode
+        self.map_filter = map_filter
+        self.use_onehot = use_onehot
         
         # 训练状态
         self.current_epoch = 0
@@ -178,6 +175,12 @@ class Trainer:
         import json
         from pathlib import Path
         
+        # 地图到One-Hot的映射
+        MAP_TO_ONEHOT = {
+            "mp_rr_district": [1.0, 0.0],
+            "mp_rr_tropic": [0.0, 1.0]
+        }
+        
         # 读取验证集原始数据
         data_dir = Path(__file__).parent.parent / "data" / "use"
         val_data_path = data_dir / "val.json"
@@ -191,6 +194,16 @@ class Trainer:
         
         with torch.no_grad():
             for item in val_data:
+                map_name = item.get("map", "")
+                
+                # 排除的地图
+                if map_name in ["mp_rr_desertlands_hu"]:
+                    continue
+                
+                # 地图过滤（用于分地图模型）
+                if self.map_filter and map_name != self.map_filter:
+                    continue
+                
                 rings = item.get("rings", [])
                 if len(rings) < 3:
                     continue
@@ -201,6 +214,17 @@ class Trainer:
                 x3, y3, r3 = rings[2]["x"] / grid_size, rings[2]["y"] / grid_size, rings[2]["r"] / grid_size
                 
                 ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
+                x3, y3, r3 = rings[2]["x"] / grid_size, rings[2]["y"] / grid_size, rings[2]["r"] / grid_size
+                
+                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
+                
+                # One-Hot编码（如果需要）
+                if self.use_onehot:
+                    if map_name in MAP_TO_ONEHOT:
+                        map_onehot = torch.tensor(MAP_TO_ONEHOT[map_name], dtype=torch.float32).to(self.device)
+                    else:
+                        # 未知地图，跳过
+                        continue
                 
                 if self.coordinate_mode == "absolute":
                     # 绝对坐标模式
@@ -208,10 +232,18 @@ class Trainer:
                     ring3_true = torch.tensor([x3, y3, r3], dtype=torch.float32)
                     
                     # 场景1：只给Ring1，预测Ring2再预测Ring3
-                    input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
+                    if self.use_onehot:
+                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device), map_onehot]).unsqueeze(0)
+                    else:
+                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
+                    
                     ring2_pred = self.model(input1).squeeze(0)
                     
-                    input2 = torch.cat([ring1, ring2_pred]).unsqueeze(0)
+                    if self.use_onehot:
+                        input2 = torch.cat([ring1, ring2_pred, map_onehot]).unsqueeze(0)
+                    else:
+                        input2 = torch.cat([ring1, ring2_pred]).unsqueeze(0)
+                    
                     ring3_pred_s1 = self.model(input2).squeeze(0).cpu()
                     
                     # 计算场景1的Ring3误差
@@ -219,7 +251,11 @@ class Trainer:
                     scenario1_errors.append(center_error_s1)
                     
                     # 场景2：给Ring1+Ring2，预测Ring3
-                    input3 = torch.cat([ring1, ring2_true]).unsqueeze(0)
+                    if self.use_onehot:
+                        input3 = torch.cat([ring1, ring2_true, map_onehot]).unsqueeze(0)
+                    else:
+                        input3 = torch.cat([ring1, ring2_true]).unsqueeze(0)
+                    
                     ring3_pred_s2 = self.model(input3).squeeze(0).cpu()
                     
                     # 计算场景2的Ring3误差
@@ -229,7 +265,11 @@ class Trainer:
                 elif self.coordinate_mode == "relative":
                     # 相对坐标模式
                     # 场景1：只给Ring1，预测Ring2（相对坐标）再预测Ring3（相对坐标）
-                    input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
+                    if self.use_onehot:
+                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device), map_onehot]).unsqueeze(0)
+                    else:
+                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
+                    
                     ring2_pred_rel = self.model(input1).squeeze(0)  # [dx2, dy2, r2]
                     
                     # 转换为绝对坐标（保持在GPU上用于下一步预测）
@@ -237,7 +277,11 @@ class Trainer:
                     ring2_pred_abs_y = ring1[1].item() + ring2_pred_rel[1].item()
                     
                     # 预测Ring3（相对Ring2）
-                    input2 = torch.cat([ring1, ring2_pred_rel]).unsqueeze(0)
+                    if self.use_onehot:
+                        input2 = torch.cat([ring1, ring2_pred_rel, map_onehot]).unsqueeze(0)
+                    else:
+                        input2 = torch.cat([ring1, ring2_pred_rel]).unsqueeze(0)
+                    
                     ring3_pred_rel = self.model(input2).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
                     
                     # 转换为绝对坐标
@@ -252,7 +296,11 @@ class Trainer:
                     dx2_true, dy2_true = x2 - x1, y2 - y1
                     ring2_true_rel = torch.tensor([dx2_true, dy2_true, r2], dtype=torch.float32).to(self.device)
                     
-                    input3 = torch.cat([ring1, ring2_true_rel]).unsqueeze(0)
+                    if self.use_onehot:
+                        input3 = torch.cat([ring1, ring2_true_rel, map_onehot]).unsqueeze(0)
+                    else:
+                        input3 = torch.cat([ring1, ring2_true_rel]).unsqueeze(0)
+                    
                     ring3_pred_rel_s2 = self.model(input3).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
                     
                     # 转换为绝对坐标
@@ -350,53 +398,7 @@ class Trainer:
             print(f"训练完成！最佳验证损失: {self.best_val_loss:.6f}")
             print(f"{'='*60}\n")
         
-        # 自动评估
-        if self.auto_evaluate and self.test_loader is not None:
-            self._auto_evaluate()
-        
         return self.history
-    
-    def _auto_evaluate(self) -> None:
-        """
-        训练完成后自动评估（包含可视化）
-        """
-        if self.verbose:
-            print("开始自动评估...")
-        
-        # 加载最佳模型
-        best_model_path = self.save_dir / "best_model.pth"
-        if best_model_path.exists():
-            self.model.load_checkpoint(str(best_model_path))
-            if self.verbose:
-                print(f"已加载最佳模型: {best_model_path}")
-        
-        # 导入评估器
-        from model.evaluator import Evaluator
-        
-        # 创建评估器（传入baseline路径和coordinate_mode）
-        evaluator = Evaluator(
-            self.model, 
-            device=self.device,
-            baseline_model_path=self.baseline_model_path,
-            coordinate_mode=self.coordinate_mode
-        )
-        
-        # 评估
-        if self.verbose:
-            print("\n评估模型...")
-        metrics = evaluator.evaluate(self.test_loader)
-        evaluator.print_metrics(metrics)
-        
-        # 可视化
-        vis_dir = self.save_dir.parent / "visualizations"
-        if self.verbose:
-            print(f"\n生成可视化...")
-        evaluator.visualize_predictions(output_dir=str(vis_dir))
-        
-        if self.verbose:
-            print(f"\n评估完成！")
-            print(f"  模型: {best_model_path}")
-            print(f"  可视化: {vis_dir}")
     
     def save_checkpoint(self, filename: str) -> None:
         """
