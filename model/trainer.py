@@ -232,27 +232,20 @@ class Trainer:
                     input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
                     ring2_pred_rel = self.model(input1).squeeze(0)  # [dx2, dy2, r2]
                     
-                    # 转换为绝对坐标
-                    ring2_pred_abs = torch.tensor([
-                        ring1[0] + ring2_pred_rel[0],
-                        ring1[1] + ring2_pred_rel[1],
-                        ring2_pred_rel[2]
-                    ]).to(self.device)
+                    # 转换为绝对坐标（保持在GPU上用于下一步预测）
+                    ring2_pred_abs_x = ring1[0].item() + ring2_pred_rel[0].item()
+                    ring2_pred_abs_y = ring1[1].item() + ring2_pred_rel[1].item()
                     
                     # 预测Ring3（相对Ring2）
                     input2 = torch.cat([ring1, ring2_pred_rel]).unsqueeze(0)
                     ring3_pred_rel = self.model(input2).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
                     
                     # 转换为绝对坐标
-                    ring3_pred_abs_s1 = torch.tensor([
-                        ring2_pred_abs[0] + ring3_pred_rel[0],
-                        ring2_pred_abs[1] + ring3_pred_rel[1],
-                        ring3_pred_rel[2]
-                    ]).cpu()
+                    ring3_pred_abs_x = ring2_pred_abs_x + ring3_pred_rel[0].item()
+                    ring3_pred_abs_y = ring2_pred_abs_y + ring3_pred_rel[1].item()
                     
                     # 计算场景1的Ring3误差
-                    ring3_true_abs = torch.tensor([x3, y3, r3])
-                    center_error_s1 = torch.sqrt(((ring3_pred_abs_s1[:2] - ring3_true_abs[:2]) ** 2).sum()).item() * grid_size
+                    center_error_s1 = ((ring3_pred_abs_x - x3) ** 2 + (ring3_pred_abs_y - y3) ** 2) ** 0.5 * grid_size
                     scenario1_errors.append(center_error_s1)
                     
                     # 场景2：给Ring1+Ring2（真实），预测Ring3
@@ -263,14 +256,11 @@ class Trainer:
                     ring3_pred_rel_s2 = self.model(input3).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
                     
                     # 转换为绝对坐标
-                    ring3_pred_abs_s2 = torch.tensor([
-                        x2 + ring3_pred_rel_s2[0].item(),
-                        y2 + ring3_pred_rel_s2[1].item(),
-                        ring3_pred_rel_s2[2].item()
-                    ])
+                    ring3_pred_abs_x_s2 = x2 + ring3_pred_rel_s2[0].item()
+                    ring3_pred_abs_y_s2 = y2 + ring3_pred_rel_s2[1].item()
                     
                     # 计算场景2的Ring3误差
-                    center_error_s2 = torch.sqrt(((ring3_pred_abs_s2[:2] - ring3_true_abs[:2]) ** 2).sum()).item() * grid_size
+                    center_error_s2 = ((ring3_pred_abs_x_s2 - x3) ** 2 + (ring3_pred_abs_y_s2 - y3) ** 2) ** 0.5 * grid_size
                     scenario2_errors.append(center_error_s2)
         
         avg_s1 = sum(scenario1_errors) / len(scenario1_errors) if scenario1_errors else 0
