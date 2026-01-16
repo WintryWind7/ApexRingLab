@@ -63,7 +63,7 @@ class BaselinePredictor(Predictor):
                 
                 # 预测Ring2（相对坐标）
                 ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
-                input1 = torch.cat([ring1, torch.zeros(3).to(self.device), map_onehot]).unsqueeze(0)
+                input1 = torch.cat([map_onehot, ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
                 output1 = self.model(input1).cpu().numpy()[0]  # [dx2, dy2, r2]
                 
                 # 转换为绝对坐标
@@ -74,7 +74,7 @@ class BaselinePredictor(Predictor):
                 # 预测Ring3（相对Ring2）
                 dx2, dy2 = output1[0], output1[1]
                 ring2_rel = torch.tensor([dx2, dy2, r2], dtype=torch.float32).to(self.device)
-                input2 = torch.cat([ring1, ring2_rel, map_onehot]).unsqueeze(0)
+                input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
                 output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3, r3] 相对Ring2
                 
                 # 转换为绝对坐标
@@ -98,7 +98,7 @@ class BaselinePredictor(Predictor):
                 # 预测Ring3（相对Ring2）
                 ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
                 ring2_rel = torch.tensor([dx2, dy2, r2], dtype=torch.float32).to(self.device)
-                input2 = torch.cat([ring1, ring2_rel, map_onehot]).unsqueeze(0)
+                input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
                 output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3, r3] 相对Ring2
                 
                 # 转换为绝对坐标

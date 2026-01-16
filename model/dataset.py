@@ -119,10 +119,10 @@ class RingDataset(Dataset):
                 ring3 = [x3, y3, r3]
                 
                 # 样本 1: ring1 + map → ring2
-                samples.append((ring1 + map_onehot, ring2))
+                samples.append((map_onehot + ring1, ring2))
                 
                 # 样本 2: ring1+ring2 + map → ring3
-                samples.append((ring1 + ring2 + map_onehot, ring3))
+                samples.append((map_onehot + ring1 + ring2, ring3))
             
             elif self.coordinate_mode == "relative":
                 # 相对坐标模式
@@ -133,16 +133,16 @@ class RingDataset(Dataset):
                 dx3, dy3 = x3 - x2, y3 - y2  # Ring3相对Ring2
                 
                 # 样本 1: ring1 + map → ring2 (相对坐标)
-                # 输入: [x1, y1, r1, 0, 0, 0] + map_onehot
+                # 输入: map_onehot + [x1, y1, r1, 0, 0, 0]
                 # 输出: [dx2, dy2, r2]
-                input1 = [x1, y1, r1, 0, 0, 0] + map_onehot
+                input1 = map_onehot + [x1, y1, r1, 0, 0, 0]
                 target1 = [dx2, dy2, r2]
                 samples.append((input1, target1))
                 
                 # 样本 2: ring1 + ring2 + map → ring3 (相对坐标)
-                # 输入: [x1, y1, r1, dx2, dy2, r2] + map_onehot
+                # 输入: map_onehot + [x1, y1, r1, dx2, dy2, r2]
                 # 输出: [dx3, dy3, r3]
-                input2 = [x1, y1, r1, dx2, dy2, r2] + map_onehot
+                input2 = map_onehot + [x1, y1, r1, dx2, dy2, r2]
                 target2 = [dx3, dy3, r3]
                 samples.append((input2, target2))
         
