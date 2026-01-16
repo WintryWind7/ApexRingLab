@@ -260,6 +260,108 @@ class ConstrainedLoss(nn.Module):
         return penalty.mean()
 
 
+class DistanceConstrainedLoss(nn.Module):
+    """
+    带距离约束的损失函数 - 鼓励模型学习贴边刷圈
+    
+    loss = base_loss + lambda_distance * distance_penalty
+    
+    distance_penalty惩罚那些预测距离与真实距离差异大的样本
+    """
+    
+    def __init__(
+        self,
+        base_loss: nn.Module = None,
+        lambda_distance: float = 1.0
+    ):
+        """
+        Args:
+            base_loss: 基础损失函数（如MSE），默认使用MSE
+            lambda_distance: 距离约束权重
+        """
+        super().__init__()
+        self.base_loss = base_loss if base_loss is not None else MSELoss()
+        self.lambda_distance = lambda_distance
+    
+    def forward(
+        self, 
+        pred: torch.Tensor, 
+        target: torch.Tensor,
+        input_data: torch.Tensor = None
+    ) -> torch.Tensor:
+        """
+        Args:
+            pred: 预测值 (batch_size, 3) - [dx, dy, r] (相对坐标)
+            target: 目标值 (batch_size, 3) - [dx, dy, r] (相对坐标)
+            input_data: 输入数据 (batch_size, input_dim)
+                需要包含上一级圈的半径信息来计算normalized_distance
+            
+        Returns:
+            损失值
+        """
+        # 基础损失
+        base = self.base_loss(pred, target)
+        
+        # 如果没有提供输入数据，只返回基础损失
+        if input_data is None:
+            return base
+        
+        # 计算距离约束惩罚
+        distance_penalty = self._compute_distance_penalty(pred, target, input_data)
+        
+        # 总损失
+        total_loss = base + self.lambda_distance * distance_penalty
+        
+        return total_loss
+    
+    def _compute_distance_penalty(
+        self, 
+        pred: torch.Tensor, 
+        target: torch.Tensor,
+        input_data: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        计算距离约束惩罚
+        
+        惩罚预测的normalized_distance与真实的normalized_distance的差异
+        normalized_distance = sqrt(dx² + dy²) / (r_prev - r_current)
+        
+        关键：使用真实半径计算，避免影响半径学习
+        """
+        # 提取预测和目标的相对坐标
+        dx_pred, dy_pred = pred[:, 0], pred[:, 1]
+        dx_target, dy_target, r_target = target[:, 0], target[:, 1], target[:, 2]
+        
+        # 从input_data中提取上一级圈的半径
+        # 假设输入格式：[map1, map2, x1, y1, r1, dx2, dy2, r2, ...]
+        input_dim = input_data.shape[1]
+        
+        # 根据输入维度判断
+        if input_dim >= 5:
+            r_prev = input_data[:, 4]  # r1的位置
+            
+            if input_dim >= 8:
+                r_prev = input_data[:, 7]  # r2的位置
+        else:
+            return torch.tensor(0.0, device=pred.device)
+        
+        # 使用真实半径计算最大距离
+        max_distance = torch.clamp(r_prev - r_target, min=0.01)
+        
+        # 计算预测的normalized_distance（基于真实半径）
+        distance_pred = torch.sqrt(dx_pred**2 + dy_pred**2 + 1e-8)
+        normalized_distance_pred = torch.clamp(distance_pred / max_distance, max=10.0)
+        
+        # 计算真实的normalized_distance（基于真实半径）
+        distance_target = torch.sqrt(dx_target**2 + dy_target**2 + 1e-8)
+        normalized_distance_target = torch.clamp(distance_target / max_distance, max=10.0)
+        
+        # 计算差异（MSE）- 只约束位置，不影响半径
+        penalty = ((normalized_distance_pred - normalized_distance_target) ** 2).mean()
+        
+        return penalty
+
+
 def get_loss_fn(loss_type: str = "mse", **kwargs):
     """
     获取损失函数
@@ -271,7 +373,8 @@ def get_loss_fn(loss_type: str = "mse", **kwargs):
             - "weighted_mse": 加权均方误差
             - "circle": 圆形损失
             - "combined": 组合损失
-            - "constrained": 带约束的损失（推荐用于毒圈预测）
+            - "constrained": 带约束的损失（确保圈在上一级圈内）
+            - "distance_constrained": 带距离约束的损失（鼓励学习贴边刷圈）
         **kwargs: 损失函数参数
         
     Returns:
@@ -284,6 +387,7 @@ def get_loss_fn(loss_type: str = "mse", **kwargs):
         "circle": CircleLoss,
         "combined": CombinedLoss,
         "constrained": ConstrainedLoss,
+        "distance_constrained": DistanceConstrainedLoss,
     }
     
     if loss_type not in loss_dict:
