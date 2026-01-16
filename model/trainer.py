@@ -50,7 +50,9 @@ class Trainer:
         verbose: bool = True,
         coordinate_mode: str = "relative",
         map_filter: Optional[str] = None,
-        use_onehot: bool = False
+        use_onehot: bool = False,
+        extra_feature_dims: int = 0,
+        compute_scenario_errors: bool = False
     ):
         """
         初始化训练器
@@ -69,6 +71,8 @@ class Trainer:
             coordinate_mode: 坐标模式 ('absolute' 或 'relative')
             map_filter: 地图过滤器（用于分地图模型验证）
             use_onehot: 是否使用One-Hot地图编码
+            extra_feature_dims: 额外特征维度（如距离特征）
+            compute_scenario_errors: 是否计算场景误差（会显著降低训练速度，默认False）
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -84,6 +88,8 @@ class Trainer:
         self.coordinate_mode = coordinate_mode
         self.map_filter = map_filter
         self.use_onehot = use_onehot
+        self.extra_feature_dims = extra_feature_dims
+        self.compute_scenario_errors = compute_scenario_errors
         
         # 训练状态
         self.current_epoch = 0
@@ -160,8 +166,11 @@ class Trainer:
         
         avg_loss = total_loss / num_batches
         
-        # 计算场景误差（使用简化的评估）
-        scenario1_error, scenario2_error = self._compute_scenario_errors()
+        # 只在需要时计算场景误差（会显著降低训练速度）
+        if self.compute_scenario_errors:
+            scenario1_error, scenario2_error = self._compute_scenario_errors()
+        else:
+            scenario1_error, scenario2_error = 0.0, 0.0
         
         return avg_loss, scenario1_error, scenario2_error
     
@@ -266,9 +275,9 @@ class Trainer:
                     # 相对坐标模式
                     # 场景1：只给Ring1，预测Ring2（相对坐标）再预测Ring3（相对坐标）
                     if self.use_onehot:
-                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device), map_onehot]).unsqueeze(0)
+                        input1 = torch.cat([map_onehot, ring1, torch.zeros(3 + self.extra_feature_dims).to(self.device)]).unsqueeze(0)
                     else:
-                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
+                        input1 = torch.cat([ring1, torch.zeros(3 + self.extra_feature_dims).to(self.device)]).unsqueeze(0)
                     
                     ring2_pred_rel = self.model(input1).squeeze(0)  # [dx2, dy2, r2]
                     
@@ -278,9 +287,18 @@ class Trainer:
                     
                     # 预测Ring3（相对Ring2）
                     if self.use_onehot:
-                        input2 = torch.cat([ring1, ring2_pred_rel, map_onehot]).unsqueeze(0)
+                        # 如果有额外特征，用0填充
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input2 = torch.cat([map_onehot, ring1, ring2_pred_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input2 = torch.cat([map_onehot, ring1, ring2_pred_rel]).unsqueeze(0)
                     else:
-                        input2 = torch.cat([ring1, ring2_pred_rel]).unsqueeze(0)
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input2 = torch.cat([ring1, ring2_pred_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input2 = torch.cat([ring1, ring2_pred_rel]).unsqueeze(0)
                     
                     ring3_pred_rel = self.model(input2).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
                     
@@ -297,9 +315,18 @@ class Trainer:
                     ring2_true_rel = torch.tensor([dx2_true, dy2_true, r2], dtype=torch.float32).to(self.device)
                     
                     if self.use_onehot:
-                        input3 = torch.cat([ring1, ring2_true_rel, map_onehot]).unsqueeze(0)
+                        # 如果有额外特征，用0填充
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input3 = torch.cat([map_onehot, ring1, ring2_true_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input3 = torch.cat([map_onehot, ring1, ring2_true_rel]).unsqueeze(0)
                     else:
-                        input3 = torch.cat([ring1, ring2_true_rel]).unsqueeze(0)
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input3 = torch.cat([ring1, ring2_true_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input3 = torch.cat([ring1, ring2_true_rel]).unsqueeze(0)
                     
                     ring3_pred_rel_s2 = self.model(input3).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
                     
@@ -335,7 +362,10 @@ class Trainer:
         # 创建训练日志文件
         log_file = self.save_dir / "training_log.txt"
         with open(log_file, "w", encoding="utf-8") as f:
-            f.write("Epoch\tTrain\tVal\tR3(S1)\tR3(S2)\tBest\n")
+            if self.compute_scenario_errors:
+                f.write("Epoch\tTrain\tVal\tR3(S1)\tR3(S2)\tBest\n")
+            else:
+                f.write("Epoch\tTrain\tVal\tBest\n")
         
         for epoch in range(num_epochs):
             self.current_epoch = epoch + 1
@@ -370,22 +400,34 @@ class Trainer:
             # 打印信息
             if self.verbose:
                 best_mark = " ✓" if is_best else ""
-                print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
-                      f"Train: {train_loss:.6f}\t"
-                      f"Val: {val_loss:.6f}\t"
-                      f"R3(S1): {scenario1_error:4.0f}px\t"
-                      f"R3(S2): {scenario2_error:4.0f}px"
-                      f"{best_mark}")
+                if self.compute_scenario_errors:
+                    print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
+                          f"Train: {train_loss:.6f}\t"
+                          f"Val: {val_loss:.6f}\t"
+                          f"R3(S1): {scenario1_error:4.0f}px\t"
+                          f"R3(S2): {scenario2_error:4.0f}px"
+                          f"{best_mark}")
+                else:
+                    print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
+                          f"Train: {train_loss:.6f}\t"
+                          f"Val: {val_loss:.6f}"
+                          f"{best_mark}")
             
             # 写入日志
             with open(log_file, "a", encoding="utf-8") as f:
                 best_mark = "✓" if is_best else ""
-                f.write(f"{self.current_epoch:3d}\t"
-                       f"{train_loss:.6f}\t"
-                       f"{val_loss:.6f}\t"
-                       f"{scenario1_error:4.0f}\t"
-                       f"{scenario2_error:4.0f}\t"
-                       f"{best_mark}\n")
+                if self.compute_scenario_errors:
+                    f.write(f"{self.current_epoch:3d}\t"
+                           f"{train_loss:.6f}\t"
+                           f"{val_loss:.6f}\t"
+                           f"{scenario1_error:4.0f}\t"
+                           f"{scenario2_error:4.0f}\t"
+                           f"{best_mark}\n")
+                else:
+                    f.write(f"{self.current_epoch:3d}\t"
+                           f"{train_loss:.6f}\t"
+                           f"{val_loss:.6f}\t"
+                           f"{best_mark}\n")
             
             # 早停
             if self.patience_counter >= self.early_stopping_patience:
