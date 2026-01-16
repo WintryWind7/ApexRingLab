@@ -47,7 +47,7 @@ class Evaluator:
         data_dir: Path = DATA_DIR,
         test_rings_dir: Path = TEST_RINGS_DIR,
         map_dir: Path = MAP_DIR,
-        baseline_model_path: Optional[str] = None,
+        baseline_model_path: Optional[str] = "auto",
         coordinate_mode: str = "relative"
     ):
         """
@@ -60,7 +60,10 @@ class Evaluator:
             data_dir: 数据目录（Path对象）
             test_rings_dir: 测试样本目录（Path对象）
             map_dir: 地图目录（Path对象）
-            baseline_model_path: baseline模型路径（可选），用于对比评估
+            baseline_model_path: baseline模型路径
+                - "auto": 自动加载 experiments/mlp_baseline/checkpoints/best_model.pth
+                - None: 不加载baseline
+                - str: 指定路径
             coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         """
         self.device = device
@@ -68,9 +71,17 @@ class Evaluator:
         self.test_rings_dir = Path(test_rings_dir)
         self.map_dir = Path(map_dir)
         self.grid_size = GRID_SIZE
-        self.baseline_model_path = baseline_model_path
         self.baseline_metrics = None
         self.coordinate_mode = coordinate_mode
+        
+        # 自动设置baseline路径
+        if baseline_model_path == "auto":
+            baseline_model_path = str(PROJECT_ROOT / "experiments" / "mlp_baseline" / "checkpoints" / "best_model.pth")
+            # 检查文件是否存在
+            if not Path(baseline_model_path).exists():
+                baseline_model_path = None
+        
+        self.baseline_model_path = baseline_model_path
         
         # 创建predictor
         if predictor is not None:
@@ -533,21 +544,48 @@ class Evaluator:
         # 总体半径误差
         if ring2_metrics:
             radius_err_px = ring2_metrics['radius_error'] * self.grid_size
-            print(f"\n场景1 - Ring2: {radius_err_px:.1f} px")
+            if baseline_scenario1:
+                baseline_r2 = baseline_scenario1.get("ring2_error", {})
+                baseline_radius_px = baseline_r2.get('radius_error', 0) * self.grid_size
+                print(f"\n场景1 - Ring2: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
+            else:
+                print(f"\n场景1 - Ring2: {radius_err_px:.1f} px")
         
         if scenario1_ring3_metrics:
             radius_err_px = scenario1_ring3_metrics['radius_error'] * self.grid_size
-            print(f"场景1 - Ring3: {radius_err_px:.1f} px")
+            if baseline_scenario1:
+                baseline_r3 = baseline_scenario1.get("ring3_error", {})
+                baseline_radius_px = baseline_r3.get('radius_error', 0) * self.grid_size
+                print(f"场景1 - Ring3: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
+            else:
+                print(f"场景1 - Ring3: {radius_err_px:.1f} px")
         
         if scenario2_ring3_metrics:
             radius_err_px = scenario2_ring3_metrics['radius_error'] * self.grid_size
-            print(f"场景2 - Ring3: {radius_err_px:.1f} px")
+            if baseline_scenario2:
+                baseline_r3 = baseline_scenario2.get("ring3_error", {})
+                baseline_radius_px = baseline_r3.get('radius_error', 0) * self.grid_size
+                print(f"场景2 - Ring3: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
+            else:
+                print(f"场景2 - Ring3: {radius_err_px:.1f} px")
         
         # 按地图展示半径误差
         all_maps = set()
         all_maps.update(s1_r2_by_map.keys())
         all_maps.update(s1_r3_by_map.keys())
         all_maps.update(s2_r3_by_map.keys())
+        
+        # 获取baseline按地图的半径误差
+        baseline_s1_r2_by_map = {}
+        baseline_s1_r3_by_map = {}
+        baseline_s2_r3_by_map = {}
+        if baseline_scenario1:
+            baseline_by_map = baseline_scenario1.get("by_map", {})
+            baseline_s1_r2_by_map = baseline_by_map.get("ring2_error", {})
+            baseline_s1_r3_by_map = baseline_by_map.get("ring3_error", {})
+        if baseline_scenario2:
+            baseline_by_map = baseline_scenario2.get("by_map", {})
+            baseline_s2_r3_by_map = baseline_by_map.get("ring3_error", {})
         
         if all_maps:
             print(f"\n各地图半径误差:")
@@ -556,15 +594,27 @@ class Evaluator:
                 
                 if map_name in s1_r2_by_map:
                     r_err = s1_r2_by_map[map_name]['radius_error'] * self.grid_size
-                    print(f"    场景1 - Ring2: {r_err:.1f} px")
+                    if map_name in baseline_s1_r2_by_map:
+                        baseline_r_err = baseline_s1_r2_by_map[map_name]['radius_error'] * self.grid_size
+                        print(f"    场景1 - Ring2: {r_err:.1f} px ({baseline_r_err:.1f} px)")
+                    else:
+                        print(f"    场景1 - Ring2: {r_err:.1f} px")
                 
                 if map_name in s1_r3_by_map:
                     r_err = s1_r3_by_map[map_name]['radius_error'] * self.grid_size
-                    print(f"    场景1 - Ring3: {r_err:.1f} px")
+                    if map_name in baseline_s1_r3_by_map:
+                        baseline_r_err = baseline_s1_r3_by_map[map_name]['radius_error'] * self.grid_size
+                        print(f"    场景1 - Ring3: {r_err:.1f} px ({baseline_r_err:.1f} px)")
+                    else:
+                        print(f"    场景1 - Ring3: {r_err:.1f} px")
                 
                 if map_name in s2_r3_by_map:
                     r_err = s2_r3_by_map[map_name]['radius_error'] * self.grid_size
-                    print(f"    场景2 - Ring3: {r_err:.1f} px")
+                    if map_name in baseline_s2_r3_by_map:
+                        baseline_r_err = baseline_s2_r3_by_map[map_name]['radius_error'] * self.grid_size
+                        print(f"    场景2 - Ring3: {r_err:.1f} px ({baseline_r_err:.1f} px)")
+                    else:
+                        print(f"    场景2 - Ring3: {r_err:.1f} px")
         
         # 场景1
         print(f"\n{'='*70}")
