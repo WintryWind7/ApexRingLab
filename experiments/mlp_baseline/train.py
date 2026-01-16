@@ -14,11 +14,18 @@ from model.trainer import Trainer
 from model.evaluator import Evaluator
 
 
-def train_baseline():
-    """训练MLP Baseline（One-Hot地图编码）"""
+def train_baseline(show_scenario_errors: bool = False):
+    """
+    训练MLP Baseline（One-Hot地图编码）
+    
+    Args:
+        show_scenario_errors: 是否在训练时显示场景误差（会降低训练速度）
+    """
     print(f"\n{'='*70}")
     print(f"MLP Baseline实验（One-Hot地图编码）")
     print(f"输入: 6维坐标 + 2维One-Hot地图编码")
+    if show_scenario_errors:
+        print(f"显示场景误差: 开启（训练会较慢）")
     print(f"{'='*70}\n")
     
     # 数据（使用框架的dataset，默认use_map_encoding=True）
@@ -47,7 +54,8 @@ def train_baseline():
         early_stopping_patience=20,
         verbose=True,
         coordinate_mode="relative",
-        use_onehot=True
+        use_onehot=True,
+        compute_scenario_errors=show_scenario_errors
     )
     
     trainer.train(num_epochs=100)
@@ -66,7 +74,7 @@ def train_baseline():
     
     # 创建Evaluator并评估
     test_loader = get_dataloader("test", batch_size=32, shuffle=False)
-    evaluator = Evaluator(predictor=predictor, device=device)
+    evaluator = Evaluator(predictor=predictor, device=device, baseline_model_path=None)  # baseline不对比自己
     metrics = evaluator.evaluate(test_loader)
     evaluator.print_metrics(metrics)
     
@@ -81,4 +89,11 @@ def train_baseline():
 
 
 if __name__ == "__main__":
-    train_baseline()
+    import argparse
+    
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--show-errors", action="store_true", 
+                        help="在训练时显示场景误差（会降低训练速度）")
+    args = parser.parse_args()
+    
+    train_baseline(show_scenario_errors=args.show_errors)
