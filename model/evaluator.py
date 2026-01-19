@@ -47,7 +47,6 @@ class Evaluator:
         data_dir: Path = DATA_DIR,
         test_rings_dir: Path = TEST_RINGS_DIR,
         map_dir: Path = MAP_DIR,
-        baseline_model_path: Optional[str] = "auto",
         coordinate_mode: str = "relative"
     ):
         """
@@ -60,10 +59,6 @@ class Evaluator:
             data_dir: 数据目录（Path对象）
             test_rings_dir: 测试样本目录（Path对象）
             map_dir: 地图目录（Path对象）
-            baseline_model_path: baseline模型路径
-                - "auto": 自动加载 experiments/mlp_baseline/checkpoints/best_model.pth
-                - None: 不加载baseline
-                - str: 指定路径
             coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         """
         self.device = device
@@ -71,17 +66,7 @@ class Evaluator:
         self.test_rings_dir = Path(test_rings_dir)
         self.map_dir = Path(map_dir)
         self.grid_size = GRID_SIZE
-        self.baseline_metrics = None
         self.coordinate_mode = coordinate_mode
-        
-        # 自动设置baseline路径
-        if baseline_model_path == "auto":
-            baseline_model_path = str(PROJECT_ROOT / "experiments" / "mlp_baseline" / "checkpoints" / "best_model.pth")
-            # 检查文件是否存在
-            if not Path(baseline_model_path).exists():
-                baseline_model_path = None
-        
-        self.baseline_model_path = baseline_model_path
         
         # 创建predictor
         if predictor is not None:
@@ -94,41 +79,8 @@ class Evaluator:
         
         # 保持向后兼容
         self.model = model if model is not None else getattr(predictor, 'model', None)
-        
-        # 如果提供了baseline路径，加载并评估baseline
-        if baseline_model_path:
-            self._load_baseline_metrics()
     
-    def _load_baseline_metrics(self) -> None:
-        """
-        加载baseline模型并评估，保存结果用于对比
-        """
-        from model.dataset import get_dataloader
-        from experiments.mlp_baseline.mlp_baseline import MLPBaseline
-        from experiments.mlp_baseline.predictor import BaselinePredictor
-        
-        print(f"\n加载baseline模型用于对比: {self.baseline_model_path}")
-        
-        # 保存当前predictor
-        current_predictor = self.predictor
-        
-        # 加载baseline模型
-        baseline_model = MLPBaseline()
-        baseline_model.load_checkpoint(self.baseline_model_path)
-        baseline_model = baseline_model.to(self.device)
-        
-        # 创建baseline predictor
-        baseline_predictor = BaselinePredictor(baseline_model, self.device)
-        self.predictor = baseline_predictor
-        
-        # 评估baseline
-        test_loader = get_dataloader("test", batch_size=32, shuffle=False)
-        self.baseline_metrics = self.evaluate(test_loader)
-        
-        # 恢复当前predictor
-        self.predictor = current_predictor
-        
-        print(f"* Baseline评估完成\n")
+
     
     def evaluate(self, test_loader: DataLoader) -> Dict[str, Any]:
         """
@@ -586,13 +538,6 @@ class Evaluator:
         scenario1_ring3_metrics = scenario1.get("ring3_error", {})
         scenario2_ring3_metrics = scenario2.get("ring3_error", {})
         
-        # 获取baseline指标（如果有）
-        baseline_scenario1 = None
-        baseline_scenario2 = None
-        if self.baseline_metrics:
-            baseline_scenario1 = self.baseline_metrics.get("scenario_1_only_ring1", {})
-            baseline_scenario2 = self.baseline_metrics.get("scenario_2_ring1_and_ring2", {})
-        
         # 打印半径误差（按地图展示）
         print(f"\n{'='*70}")
         print("半径误差（理论上应为0）")
@@ -606,48 +551,21 @@ class Evaluator:
         # 总体半径误差
         if ring2_metrics:
             radius_err_px = ring2_metrics['radius_error'] * self.grid_size
-            if baseline_scenario1:
-                baseline_r2 = baseline_scenario1.get("ring2_error", {})
-                baseline_radius_px = baseline_r2.get('radius_error', 0) * self.grid_size
-                print(f"\n场景1 - Ring2: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
-            else:
-                print(f"\n场景1 - Ring2: {radius_err_px:.1f} px")
+            print(f"\n场景1 - Ring2: {radius_err_px:.1f} px")
         
         if scenario1_ring3_metrics:
             radius_err_px = scenario1_ring3_metrics['radius_error'] * self.grid_size
-            if baseline_scenario1:
-                baseline_r3 = baseline_scenario1.get("ring3_error", {})
-                baseline_radius_px = baseline_r3.get('radius_error', 0) * self.grid_size
-                print(f"场景1 - Ring3: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
-            else:
-                print(f"场景1 - Ring3: {radius_err_px:.1f} px")
+            print(f"场景1 - Ring3: {radius_err_px:.1f} px")
         
         if scenario2_ring3_metrics:
             radius_err_px = scenario2_ring3_metrics['radius_error'] * self.grid_size
-            if baseline_scenario2:
-                baseline_r3 = baseline_scenario2.get("ring3_error", {})
-                baseline_radius_px = baseline_r3.get('radius_error', 0) * self.grid_size
-                print(f"场景2 - Ring3: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
-            else:
-                print(f"场景2 - Ring3: {radius_err_px:.1f} px")
+            print(f"场景2 - Ring3: {radius_err_px:.1f} px")
         
         # 按地图展示半径误差
         all_maps = set()
         all_maps.update(s1_r2_by_map.keys())
         all_maps.update(s1_r3_by_map.keys())
         all_maps.update(s2_r3_by_map.keys())
-        
-        # 获取baseline按地图的半径误差
-        baseline_s1_r2_by_map = {}
-        baseline_s1_r3_by_map = {}
-        baseline_s2_r3_by_map = {}
-        if baseline_scenario1:
-            baseline_by_map = baseline_scenario1.get("by_map", {})
-            baseline_s1_r2_by_map = baseline_by_map.get("ring2_error", {})
-            baseline_s1_r3_by_map = baseline_by_map.get("ring3_error", {})
-        if baseline_scenario2:
-            baseline_by_map = baseline_scenario2.get("by_map", {})
-            baseline_s2_r3_by_map = baseline_by_map.get("ring3_error", {})
         
         if all_maps:
             print(f"\n各地图半径误差:")
@@ -656,27 +574,15 @@ class Evaluator:
                 
                 if map_name in s1_r2_by_map:
                     r_err = s1_r2_by_map[map_name]['radius_error'] * self.grid_size
-                    if map_name in baseline_s1_r2_by_map:
-                        baseline_r_err = baseline_s1_r2_by_map[map_name]['radius_error'] * self.grid_size
-                        print(f"    场景1 - Ring2: {r_err:.1f} px ({baseline_r_err:.1f} px)")
-                    else:
-                        print(f"    场景1 - Ring2: {r_err:.1f} px")
+                    print(f"    场景1 - Ring2: {r_err:.1f} px")
                 
                 if map_name in s1_r3_by_map:
                     r_err = s1_r3_by_map[map_name]['radius_error'] * self.grid_size
-                    if map_name in baseline_s1_r3_by_map:
-                        baseline_r_err = baseline_s1_r3_by_map[map_name]['radius_error'] * self.grid_size
-                        print(f"    场景1 - Ring3: {r_err:.1f} px ({baseline_r_err:.1f} px)")
-                    else:
-                        print(f"    场景1 - Ring3: {r_err:.1f} px")
+                    print(f"    场景1 - Ring3: {r_err:.1f} px")
                 
                 if map_name in s2_r3_by_map:
                     r_err = s2_r3_by_map[map_name]['radius_error'] * self.grid_size
-                    if map_name in baseline_s2_r3_by_map:
-                        baseline_r_err = baseline_s2_r3_by_map[map_name]['radius_error'] * self.grid_size
-                        print(f"    场景2 - Ring3: {r_err:.1f} px ({baseline_r_err:.1f} px)")
-                    else:
-                        print(f"    场景2 - Ring3: {r_err:.1f} px")
+                    print(f"    场景2 - Ring3: {r_err:.1f} px")
         
         # 场景1
         print(f"\n{'='*70}")
@@ -688,12 +594,7 @@ class Evaluator:
             center_dist_px = ring2_metrics['center_distance'] * self.grid_size
             
             print(f"\nRing2 预测误差:")
-            if baseline_scenario1:
-                baseline_r2 = baseline_scenario1.get("ring2_error", {})
-                baseline_center_px = baseline_r2.get('center_distance', 0) * self.grid_size
-                print(f"  圆心距离误差: {center_dist_px:.1f} px ({baseline_center_px:.1f} px)")
-            else:
-                print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {center_dist_px:.1f} px")
             print(f"  MSE:          {ring2_metrics['mse']:.6f}")
             print(f"  MAE:          {ring2_metrics['mae']:.6f}")
         
@@ -702,12 +603,7 @@ class Evaluator:
             center_dist_px = scenario1_ring3_metrics['center_distance'] * self.grid_size
             
             print(f"\nRing3 预测误差（基于预测的Ring2）:")
-            if baseline_scenario1:
-                baseline_r3 = baseline_scenario1.get("ring3_error", {})
-                baseline_center_px = baseline_r3.get('center_distance', 0) * self.grid_size
-                print(f"  圆心距离误差: {center_dist_px:.1f} px ({baseline_center_px:.1f} px)")
-            else:
-                print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {center_dist_px:.1f} px")
             print(f"  MSE:          {scenario1_ring3_metrics['mse']:.6f}")
             print(f"  MAE:          {scenario1_ring3_metrics['mae']:.6f}")
         
@@ -717,14 +613,6 @@ class Evaluator:
             ring2_by_map = by_map.get("ring2_error", {})
             ring3_by_map = by_map.get("ring3_error", {})
             
-            # 获取baseline按地图的指标
-            baseline_r2_by_map = {}
-            baseline_r3_by_map = {}
-            if baseline_scenario1:
-                baseline_by_map = baseline_scenario1.get("by_map", {})
-                baseline_r2_by_map = baseline_by_map.get("ring2_error", {})
-                baseline_r3_by_map = baseline_by_map.get("ring3_error", {})
-            
             if ring2_by_map or ring3_by_map:
                 print(f"\n各地图详细结果:")
                 for map_name in sorted(set(list(ring2_by_map.keys()) + list(ring3_by_map.keys()))):
@@ -733,20 +621,12 @@ class Evaluator:
                     if map_name in ring2_by_map:
                         r2_metrics = ring2_by_map[map_name]
                         center_px = r2_metrics['center_distance'] * self.grid_size
-                        if map_name in baseline_r2_by_map:
-                            baseline_center_px = baseline_r2_by_map[map_name]['center_distance'] * self.grid_size
-                            print(f"    Ring2 圆心误差: {center_px:.1f} px ({baseline_center_px:.1f} px)")
-                        else:
-                            print(f"    Ring2 圆心误差: {center_px:.1f} px")
+                        print(f"    Ring2 圆心误差: {center_px:.1f} px")
                     
                     if map_name in ring3_by_map:
                         r3_metrics = ring3_by_map[map_name]
                         center_px = r3_metrics['center_distance'] * self.grid_size
-                        if map_name in baseline_r3_by_map:
-                            baseline_center_px = baseline_r3_by_map[map_name]['center_distance'] * self.grid_size
-                            print(f"    Ring3 圆心误差: {center_px:.1f} px ({baseline_center_px:.1f} px)")
-                        else:
-                            print(f"    Ring3 圆心误差: {center_px:.1f} px")
+                        print(f"    Ring3 圆心误差: {center_px:.1f} px")
         
         # 场景2
         print(f"\n{'='*70}")
@@ -758,12 +638,7 @@ class Evaluator:
             center_dist_px = scenario2_ring3_metrics['center_distance'] * self.grid_size
             
             print(f"\nRing3 预测误差（基于真实Ring2）:")
-            if baseline_scenario2:
-                baseline_r3 = baseline_scenario2.get("ring3_error", {})
-                baseline_center_px = baseline_r3.get('center_distance', 0) * self.grid_size
-                print(f"  圆心距离误差: {center_dist_px:.1f} px ({baseline_center_px:.1f} px)")
-            else:
-                print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {center_dist_px:.1f} px")
             print(f"  MSE:          {scenario2_ring3_metrics['mse']:.6f}")
             print(f"  MAE:          {scenario2_ring3_metrics['mae']:.6f}")
         
@@ -772,22 +647,12 @@ class Evaluator:
         if by_map:
             ring3_by_map = by_map.get("ring3_error", {})
             
-            # 获取baseline按地图的指标
-            baseline_r3_by_map = {}
-            if baseline_scenario2:
-                baseline_by_map = baseline_scenario2.get("by_map", {})
-                baseline_r3_by_map = baseline_by_map.get("ring3_error", {})
-            
             if ring3_by_map:
                 print(f"\n各地图详细结果:")
                 for map_name in sorted(ring3_by_map.keys()):
                     r3_metrics = ring3_by_map[map_name]
                     center_px = r3_metrics['center_distance'] * self.grid_size
-                    if map_name in baseline_r3_by_map:
-                        baseline_center_px = baseline_r3_by_map[map_name]['center_distance'] * self.grid_size
-                        print(f"  {map_name} 圆心误差: {center_px:.1f} px ({baseline_center_px:.1f} px)")
-                    else:
-                        print(f"  {map_name} 圆心误差: {center_px:.1f} px")
+                    print(f"  {map_name} 圆心误差: {center_px:.1f} px")
         
         print(f"{'='*70}\n")
 
