@@ -128,7 +128,7 @@ class Evaluator:
         # 恢复当前predictor
         self.predictor = current_predictor
         
-        print(f"✓ Baseline评估完成\n")
+        print(f"* Baseline评估完成\n")
     
     def evaluate(self, test_loader: DataLoader) -> Dict[str, Any]:
         """
@@ -156,10 +156,15 @@ class Evaluator:
         # 分场景收集预测结果
         scenario1_ring2_preds = []  # 场景1: Ring2预测
         scenario1_ring2_targets = []
+        scenario1_ring1_positions = []  # Ring1位置（用于计算Ring2的相对指标）
+        
         scenario1_ring3_preds = []  # 场景1: Ring3预测（基于预测的Ring2）
         scenario1_ring3_targets = []
+        scenario1_ring2_pred_positions = []  # 预测的Ring2位置（用于计算Ring3的相对指标）
+        
         scenario2_ring3_preds = []  # 场景2: Ring3预测（基于真实Ring2）
         scenario2_ring3_targets = []
+        scenario2_ring2_positions = []  # 真实Ring2位置（用于计算Ring3的相对指标）
         
         scenario1_maps = []
         scenario2_maps = []
@@ -191,8 +196,11 @@ class Evaluator:
                 
                 scenario1_ring2_preds.append(ring2_pred)
                 scenario1_ring2_targets.append(ring2_true)
+                scenario1_ring1_positions.append(torch.tensor([x1, y1], dtype=torch.float32))
+                
                 scenario1_ring3_preds.append(ring3_pred)
                 scenario1_ring3_targets.append(ring3_true)
+                scenario1_ring2_pred_positions.append(torch.tensor([ring2_pred_data["x"], ring2_pred_data["y"]], dtype=torch.float32))
                 scenario1_maps.append(map_name)
                 
                 # 场景2：提供Ring1+真实Ring2，预测Ring3
@@ -201,20 +209,32 @@ class Evaluator:
                 
                 scenario2_ring3_preds.append(ring3_pred_s2)
                 scenario2_ring3_targets.append(ring3_true)
+                scenario2_ring2_positions.append(torch.tensor([x2, y2], dtype=torch.float32))
                 scenario2_maps.append(map_name)
         
         # 转换为张量
         scenario1_ring2_preds = torch.stack(scenario1_ring2_preds)
         scenario1_ring2_targets = torch.stack(scenario1_ring2_targets)
+        scenario1_ring1_positions = torch.stack(scenario1_ring1_positions)
+        
         scenario1_ring3_preds = torch.stack(scenario1_ring3_preds)
         scenario1_ring3_targets = torch.stack(scenario1_ring3_targets)
+        scenario1_ring2_pred_positions = torch.stack(scenario1_ring2_pred_positions)
+        
         scenario2_ring3_preds = torch.stack(scenario2_ring3_preds)
         scenario2_ring3_targets = torch.stack(scenario2_ring3_targets)
+        scenario2_ring2_positions = torch.stack(scenario2_ring2_positions)
         
-        # 计算指标
-        scenario1_ring2_metrics = self._compute_metrics(scenario1_ring2_preds, scenario1_ring2_targets)
-        scenario1_ring3_metrics = self._compute_metrics(scenario1_ring3_preds, scenario1_ring3_targets)
-        scenario2_ring3_metrics = self._compute_metrics(scenario2_ring3_preds, scenario2_ring3_targets)
+        # 计算指标（传入前一个Ring的位置）
+        scenario1_ring2_metrics = self._compute_metrics(
+            scenario1_ring2_preds, scenario1_ring2_targets, scenario1_ring1_positions
+        )
+        scenario1_ring3_metrics = self._compute_metrics(
+            scenario1_ring3_preds, scenario1_ring3_targets, scenario1_ring2_pred_positions
+        )
+        scenario2_ring3_metrics = self._compute_metrics(
+            scenario2_ring3_preds, scenario2_ring3_targets, scenario2_ring2_positions
+        )
         
         # 按地图计算指标
         scenario1_ring2_by_map = self._compute_metrics_by_map(
@@ -244,13 +264,19 @@ class Evaluator:
             }
         }
     
-    def _compute_metrics(self, preds: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
+    def _compute_metrics(
+        self, 
+        preds: torch.Tensor, 
+        targets: torch.Tensor,
+        prev_positions: torch.Tensor = None
+    ) -> Dict[str, float]:
         """
         计算评估指标
         
         Args:
-            preds: 预测值 (N, 3)
-            targets: 真实值 (N, 3)
+            preds: 预测值 (N, 3) - [x, y, r]
+            targets: 真实值 (N, 3) - [x, y, r]
+            prev_positions: 前一个Ring的位置 (N, 2) - [x_prev, y_prev]，用于计算相对位置指标
             
         Returns:
             指标字典
@@ -287,6 +313,42 @@ class Evaluator:
             "y_error": y_error,
             "r_error": r_error,
         }
+        
+        # 计算相对位置指标（如果提供了前一个Ring的位置）
+        if prev_positions is not None:
+            # 真实方向向量
+            dx_true = targets[:, 0] - prev_positions[:, 0]
+            dy_true = targets[:, 1] - prev_positions[:, 1]
+            
+            # 预测方向向量
+            dx_pred = preds[:, 0] - prev_positions[:, 0]
+            dy_pred = preds[:, 1] - prev_positions[:, 1]
+            
+            # 角度误差（归一化到 0-1，180度对称性）
+            angle_true = torch.atan2(dy_true, dx_true)
+            angle_pred = torch.atan2(dy_pred, dx_pred)
+            angle_diff = torch.abs(angle_pred - angle_true)
+            
+            # 考虑180度对称性：0度和180度等价
+            # 将角度差归一化到 [0, π/2]，再除以 π/2 得到 [0, 1]
+            angle_error = torch.min(angle_diff, 2 * np.pi - angle_diff)
+            angle_error = torch.min(angle_error, torch.abs(np.pi - angle_error))
+            angle_error_normalized = (angle_error / (np.pi / 2)).mean().item()
+            
+            # 距离误差比例（归一化到 0-1）
+            dist_true = torch.sqrt(dx_true**2 + dy_true**2)
+            dist_pred = torch.sqrt(dx_pred**2 + dy_pred**2)
+            
+            # 避免除零
+            valid_mask = dist_true > 1e-6
+            if valid_mask.sum() > 0:
+                distance_ratio = dist_pred[valid_mask] / dist_true[valid_mask]
+                distance_error_ratio = torch.abs(distance_ratio - 1.0).mean().item()
+            else:
+                distance_error_ratio = 0.0
+            
+            metrics["angle_error"] = angle_error_normalized
+            metrics["distance_error_ratio"] = distance_error_ratio
         
         return metrics
     
