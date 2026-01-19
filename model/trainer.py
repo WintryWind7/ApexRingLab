@@ -52,7 +52,10 @@ class Trainer:
         map_filter: Optional[str] = None,
         use_onehot: bool = False,
         extra_feature_dims: int = 0,
-        compute_scenario_errors: bool = False
+        compute_scenario_errors: bool = False,
+        predictor_class: Optional[type] = None,
+        test_loader: Optional[DataLoader] = None,
+        auto_evaluate: bool = True
     ):
         """
         初始化训练器
@@ -73,6 +76,9 @@ class Trainer:
             use_onehot: 是否使用One-Hot地图编码
             extra_feature_dims: 额外特征维度（如距离特征）
             compute_scenario_errors: 是否计算场景误差（会显著降低训练速度，默认False）
+            predictor_class: Predictor类（用于训练后自动评估）
+            test_loader: 测试数据加载器（用于训练后自动评估）
+            auto_evaluate: 是否在训练完成后自动评估（默认True）
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -90,10 +96,14 @@ class Trainer:
         self.use_onehot = use_onehot
         self.extra_feature_dims = extra_feature_dims
         self.compute_scenario_errors = compute_scenario_errors
+        self.predictor_class = predictor_class
+        self.test_loader = test_loader
+        self.auto_evaluate = auto_evaluate
         
         # 训练状态
         self.current_epoch = 0
         self.best_val_loss = float("inf")
+        self.best_epoch = 0  # 新增：记录最佳模型的轮数
         self.patience_counter = 0
         self.history = {
             "train_loss": [],
@@ -359,14 +369,6 @@ class Trainer:
             print(f"验证样本: {len(self.val_loader.dataset)}")
             print(f"{'='*60}\n")
         
-        # 创建训练日志文件
-        log_file = self.save_dir / "training_log.txt"
-        with open(log_file, "w", encoding="utf-8") as f:
-            if self.compute_scenario_errors:
-                f.write("Epoch\tTrain\tVal\tR3(S1)\tR3(S2)\tBest\n")
-            else:
-                f.write("Epoch\tTrain\tVal\tBest\n")
-        
         for epoch in range(num_epochs):
             self.current_epoch = epoch + 1
             start_time = time.time()
@@ -391,6 +393,7 @@ class Trainer:
             is_best = False
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
+                self.best_epoch = self.current_epoch  # 记录最佳轮数
                 self.patience_counter = 0
                 self.save_checkpoint("best_model.pth")
                 is_best = True
@@ -399,7 +402,7 @@ class Trainer:
             
             # 打印信息
             if self.verbose:
-                best_mark = " ✓" if is_best else ""
+                best_mark = " *" if is_best else ""
                 if self.compute_scenario_errors:
                     print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
                           f"Train: {train_loss:.6f}\t"
@@ -413,22 +416,6 @@ class Trainer:
                           f"Val: {val_loss:.6f}"
                           f"{best_mark}")
             
-            # 写入日志
-            with open(log_file, "a", encoding="utf-8") as f:
-                best_mark = "✓" if is_best else ""
-                if self.compute_scenario_errors:
-                    f.write(f"{self.current_epoch:3d}\t"
-                           f"{train_loss:.6f}\t"
-                           f"{val_loss:.6f}\t"
-                           f"{scenario1_error:4.0f}\t"
-                           f"{scenario2_error:4.0f}\t"
-                           f"{best_mark}\n")
-                else:
-                    f.write(f"{self.current_epoch:3d}\t"
-                           f"{train_loss:.6f}\t"
-                           f"{val_loss:.6f}\t"
-                           f"{best_mark}\n")
-            
             # 早停
             if self.patience_counter >= self.early_stopping_patience:
                 if self.verbose:
@@ -439,6 +426,10 @@ class Trainer:
             print(f"\n{'='*60}")
             print(f"训练完成！最佳验证损失: {self.best_val_loss:.6f}")
             print(f"{'='*60}\n")
+        
+        # 训练完成后自动评估
+        if self.auto_evaluate and self.predictor_class and self.test_loader:
+            self._auto_evaluate()
         
         return self.history
     
@@ -457,8 +448,10 @@ class Trainer:
             optimizer_state=self.optimizer.state_dict(),
             metrics={
                 "best_val_loss": self.best_val_loss,
+                "best_epoch": self.best_epoch,  # 新增：最佳模型的轮数
                 "train_loss": self.history["train_loss"][-1] if self.history["train_loss"] else None,
                 "val_loss": self.history["val_loss"][-1] if self.history["val_loss"] else None,
+                "history": self.history  # 保存完整训练历史
             }
         )
     
@@ -483,6 +476,68 @@ class Trainer:
             self.best_val_loss = metrics.get("best_val_loss", float("inf"))
         
         self.current_epoch = epoch
+    
+    def _auto_evaluate(self) -> None:
+        """
+        训练完成后自动评估并保存结果到pth
+        """
+        from model.evaluator import Evaluator
+        import os
+        from datetime import datetime
+        
+        if self.verbose:
+            print(f"\n{'='*70}")
+            print(f"开始自动评估...")
+            print(f"{'='*70}\n")
+        
+        # 加载最佳模型
+        best_model_path = self.save_dir / "best_model.pth"
+        self.model.load_checkpoint(str(best_model_path))
+        
+        # 创建 Predictor 和 Evaluator
+        predictor = self.predictor_class(self.model, self.device)
+        evaluator = Evaluator(predictor=predictor, device=self.device)
+        
+        # 获取测试集版本（最后修改时间）
+        test_json_path = Path(__file__).parent.parent / "data" / "use" / "test.json"
+        test_dataset_version = None
+        if test_json_path.exists():
+            test_mtime = os.path.getmtime(test_json_path)
+            test_dataset_version = datetime.fromtimestamp(test_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 评估
+        eval_start_time = datetime.now()
+        test_metrics = evaluator.evaluate(self.test_loader)
+        eval_end_time = datetime.now()
+        evaluator.print_metrics(test_metrics)
+        
+        # 添加测试元信息
+        test_metrics_with_meta = {
+            "evaluated_at": eval_end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "test_dataset_version": test_dataset_version,
+            "evaluation_duration_seconds": (eval_end_time - eval_start_time).total_seconds(),
+            "metrics": test_metrics
+        }
+        
+        # 重新保存带测试结果的模型
+        self.model.save_checkpoint(
+            path=str(best_model_path),
+            epoch=self.best_epoch,  # 使用最佳模型的轮数
+            optimizer_state=self.optimizer.state_dict(),
+            metrics={
+                "best_val_loss": self.best_val_loss,
+                "best_epoch": self.best_epoch,  # 最佳模型的轮数
+                "train_loss": self.history["train_loss"][-1] if self.history["train_loss"] else None,
+                "val_loss": self.history["val_loss"][-1] if self.history["val_loss"] else None,
+                "history": self.history,  # 保存完整训练历史
+                "test_metrics": test_metrics_with_meta
+            }
+        )
+        
+        if self.verbose:
+            print(f"\n测试结果已写入: {best_model_path}")
+            print(f"评估时间: {test_metrics_with_meta['evaluated_at']}")
+            print(f"测试集版本: {test_dataset_version}\n")
 
 
 if __name__ == "__main__":
