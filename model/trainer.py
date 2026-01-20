@@ -87,7 +87,8 @@ class Trainer:
         self.optimizer = optimizer
         self.device = device
         self.scheduler = scheduler
-        self.save_dir = Path(save_dir)
+        # 自动在 save_dir 下创建以模型名命名的子目录
+        self.save_dir = Path(save_dir) / model.model_name
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.early_stopping_patience = early_stopping_patience
         self.verbose = verbose

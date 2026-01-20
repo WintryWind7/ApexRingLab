@@ -216,8 +216,5 @@ tests/temp/
 # 可视化结果（可通过模型重新生成）
 **/visualizations/
 
-# 训练检查点（保留training_log.txt）
-**/checkpoints/*.pth
-
-# 最佳模型（训练过程中的临时文件）
-**/best_model.pth
+# 训练检查点
+**/checkpoints/
