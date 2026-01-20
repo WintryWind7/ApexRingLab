@@ -226,31 +226,33 @@ class Evaluator:
         计算评估指标
         
         Args:
-            preds: 预测值 (N, 3) - [x, y, r]
-            targets: 真实值 (N, 3) - [x, y, r]
+            preds: 预测值 (N, 3) - [x, y, r] 归一化坐标 (0-1)
+            targets: 真实值 (N, 3) - [x, y, r] 归一化坐标 (0-1)
             prev_positions: 前一个Ring的位置 (N, 2) - [x_prev, y_prev]，用于计算相对位置指标
             
         Returns:
-            指标字典
+            指标字典（center_distance 和 radius_error 为像素值，其他为归一化值）
         """
-        # MSE
+        # MSE (归一化)
         mse = ((preds - targets) ** 2).mean().item()
         
-        # MAE
+        # MAE (归一化)
         mae = (preds - targets).abs().mean().item()
         
-        # RMSE
+        # RMSE (归一化)
         rmse = np.sqrt(mse)
         
-        # 圆心距离误差
+        # 圆心距离误差 (像素)
         center_pred = preds[:, :2]
         center_target = targets[:, :2]
         center_distance = torch.sqrt(((center_pred - center_target) ** 2).sum(dim=1)).mean().item()
+        center_distance_px = center_distance * self.grid_size
         
-        # 半径误差
+        # 半径误差 (像素)
         radius_error = (preds[:, 2] - targets[:, 2]).abs().mean().item()
+        radius_error_px = radius_error * self.grid_size
         
-        # 各维度误差
+        # 各维度误差 (归一化)
         x_error = (preds[:, 0] - targets[:, 0]).abs().mean().item()
         y_error = (preds[:, 1] - targets[:, 1]).abs().mean().item()
         r_error = radius_error
@@ -259,8 +261,8 @@ class Evaluator:
             "mse": mse,
             "mae": mae,
             "rmse": rmse,
-            "center_distance": center_distance,
-            "radius_error": radius_error,
+            "center_distance": center_distance_px,  # 像素
+            "radius_error": radius_error_px,        # 像素
             "x_error": x_error,
             "y_error": y_error,
             "r_error": r_error,
@@ -550,16 +552,13 @@ class Evaluator:
         
         # 总体半径误差
         if ring2_metrics:
-            radius_err_px = ring2_metrics['radius_error'] * self.grid_size
-            print(f"\n场景1 - Ring2: {radius_err_px:.1f} px")
+            print(f"\n场景1 - Ring2: {ring2_metrics['radius_error']:.1f} px")
         
         if scenario1_ring3_metrics:
-            radius_err_px = scenario1_ring3_metrics['radius_error'] * self.grid_size
-            print(f"场景1 - Ring3: {radius_err_px:.1f} px")
+            print(f"场景1 - Ring3: {scenario1_ring3_metrics['radius_error']:.1f} px")
         
         if scenario2_ring3_metrics:
-            radius_err_px = scenario2_ring3_metrics['radius_error'] * self.grid_size
-            print(f"场景2 - Ring3: {radius_err_px:.1f} px")
+            print(f"场景2 - Ring3: {scenario2_ring3_metrics['radius_error']:.1f} px")
         
         # 按地图展示半径误差
         all_maps = set()
@@ -573,16 +572,13 @@ class Evaluator:
                 print(f"\n  {map_name}:")
                 
                 if map_name in s1_r2_by_map:
-                    r_err = s1_r2_by_map[map_name]['radius_error'] * self.grid_size
-                    print(f"    场景1 - Ring2: {r_err:.1f} px")
+                    print(f"    场景1 - Ring2: {s1_r2_by_map[map_name]['radius_error']:.1f} px")
                 
                 if map_name in s1_r3_by_map:
-                    r_err = s1_r3_by_map[map_name]['radius_error'] * self.grid_size
-                    print(f"    场景1 - Ring3: {r_err:.1f} px")
+                    print(f"    场景1 - Ring3: {s1_r3_by_map[map_name]['radius_error']:.1f} px")
                 
                 if map_name in s2_r3_by_map:
-                    r_err = s2_r3_by_map[map_name]['radius_error'] * self.grid_size
-                    print(f"    场景2 - Ring3: {r_err:.1f} px")
+                    print(f"    场景2 - Ring3: {s2_r3_by_map[map_name]['radius_error']:.1f} px")
         
         # 场景1
         print(f"\n{'='*70}")
@@ -591,19 +587,15 @@ class Evaluator:
         
         # Ring2 误差
         if ring2_metrics:
-            center_dist_px = ring2_metrics['center_distance'] * self.grid_size
-            
             print(f"\nRing2 预测误差:")
-            print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {ring2_metrics['center_distance']:.1f} px")
             print(f"  MSE:          {ring2_metrics['mse']:.6f}")
             print(f"  MAE:          {ring2_metrics['mae']:.6f}")
         
         # Ring3 误差（基于预测的Ring2）
         if scenario1_ring3_metrics:
-            center_dist_px = scenario1_ring3_metrics['center_distance'] * self.grid_size
-            
             print(f"\nRing3 预测误差（基于预测的Ring2）:")
-            print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {scenario1_ring3_metrics['center_distance']:.1f} px")
             print(f"  MSE:          {scenario1_ring3_metrics['mse']:.6f}")
             print(f"  MAE:          {scenario1_ring3_metrics['mae']:.6f}")
         
@@ -620,13 +612,11 @@ class Evaluator:
                     
                     if map_name in ring2_by_map:
                         r2_metrics = ring2_by_map[map_name]
-                        center_px = r2_metrics['center_distance'] * self.grid_size
-                        print(f"    Ring2 圆心误差: {center_px:.1f} px")
+                        print(f"    Ring2 圆心误差: {r2_metrics['center_distance']:.1f} px")
                     
                     if map_name in ring3_by_map:
                         r3_metrics = ring3_by_map[map_name]
-                        center_px = r3_metrics['center_distance'] * self.grid_size
-                        print(f"    Ring3 圆心误差: {center_px:.1f} px")
+                        print(f"    Ring3 圆心误差: {r3_metrics['center_distance']:.1f} px")
         
         # 场景2
         print(f"\n{'='*70}")
@@ -635,10 +625,8 @@ class Evaluator:
         
         # Ring3 误差（基于真实Ring2）
         if scenario2_ring3_metrics:
-            center_dist_px = scenario2_ring3_metrics['center_distance'] * self.grid_size
-            
             print(f"\nRing3 预测误差（基于真实Ring2）:")
-            print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {scenario2_ring3_metrics['center_distance']:.1f} px")
             print(f"  MSE:          {scenario2_ring3_metrics['mse']:.6f}")
             print(f"  MAE:          {scenario2_ring3_metrics['mae']:.6f}")
         
@@ -651,8 +639,7 @@ class Evaluator:
                 print(f"\n各地图详细结果:")
                 for map_name in sorted(ring3_by_map.keys()):
                     r3_metrics = ring3_by_map[map_name]
-                    center_px = r3_metrics['center_distance'] * self.grid_size
-                    print(f"  {map_name} 圆心误差: {center_px:.1f} px")
+                    print(f"  {map_name} 圆心误差: {r3_metrics['center_distance']:.1f} px")
         
         print(f"{'='*70}\n")
 

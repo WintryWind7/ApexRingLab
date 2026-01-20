@@ -56,7 +56,8 @@ class BaseModel(nn.Module, ABC):
         path: str, 
         epoch: int = 0,
         optimizer_state: Optional[Dict] = None,
-        metrics: Optional[Dict] = None
+        metrics: Optional[Dict] = None,
+        test_metrics: Optional[Dict] = None
     ) -> None:
         """
         保存模型检查点
@@ -65,7 +66,8 @@ class BaseModel(nn.Module, ABC):
             path: 保存路径
             epoch: 当前轮次
             optimizer_state: 优化器状态
-            metrics: 评估指标
+            metrics: 训练相关指标
+            test_metrics: 测试相关指标（独立）
         """
         checkpoint = {
             "model_name": self.model_name,
@@ -78,6 +80,9 @@ class BaseModel(nn.Module, ABC):
         
         if metrics is not None:
             checkpoint["metrics"] = metrics
+        
+        if test_metrics is not None:
+            checkpoint["test_metrics"] = test_metrics
         
         # 创建目录
         Path(path).parent.mkdir(parents=True, exist_ok=True)

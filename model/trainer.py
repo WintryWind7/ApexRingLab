@@ -529,9 +529,9 @@ class Trainer:
                 "best_epoch": self.best_epoch,  # 最佳模型的轮数
                 "train_loss": self.history["train_loss"][-1] if self.history["train_loss"] else None,
                 "val_loss": self.history["val_loss"][-1] if self.history["val_loss"] else None,
-                "history": self.history,  # 保存完整训练历史
-                "test_metrics": test_metrics_with_meta
-            }
+                "history": self.history  # 保存完整训练历史
+            },
+            test_metrics=test_metrics_with_meta  # 提到顶层
         )
         
         if self.verbose:
