@@ -41,65 +41,46 @@ class Evaluator:
     
     def __init__(
         self,
-        model: nn.Module,
+        predictor = None,
+        model: nn.Module = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         data_dir: Path = DATA_DIR,
         test_rings_dir: Path = TEST_RINGS_DIR,
         map_dir: Path = MAP_DIR,
-        baseline_model_path: Optional[str] = None
+        coordinate_mode: str = "relative"
     ):
         """
         初始化评估器
         
         Args:
-            model: 要评估的模型
+            predictor: 预测器（优先使用）
+            model: 模型（如果未提供predictor，则从model创建默认predictor）
             device: 设备
             data_dir: 数据目录（Path对象）
             test_rings_dir: 测试样本目录（Path对象）
             map_dir: 地图目录（Path对象）
-            baseline_model_path: baseline模型路径（可选），用于对比评估
+            coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         """
-        self.model = model.to(device)
         self.device = device
         self.data_dir = Path(data_dir)
         self.test_rings_dir = Path(test_rings_dir)
         self.map_dir = Path(map_dir)
         self.grid_size = GRID_SIZE
-        self.baseline_model_path = baseline_model_path
-        self.baseline_metrics = None
+        self.coordinate_mode = coordinate_mode
         
-        # 如果提供了baseline路径，加载并评估baseline
-        if baseline_model_path:
-            self._load_baseline_metrics()
+        # 创建predictor
+        if predictor is not None:
+            self.predictor = predictor
+        elif model is not None:
+            # 如果只提供model，要求用户必须提供predictor
+            raise ValueError("请为模型创建对应的Predictor并传入predictor参数")
+        else:
+            raise ValueError("必须提供predictor")
+        
+        # 保持向后兼容
+        self.model = model if model is not None else getattr(predictor, 'model', None)
     
-    def _load_baseline_metrics(self) -> None:
-        """
-        加载baseline模型并评估，保存结果用于对比
-        """
-        from model.dataset import get_dataloader
-        
-        print(f"\n加载baseline模型用于对比: {self.baseline_model_path}")
-        
-        # 保存当前模型
-        current_model = self.model
-        
-        # 加载baseline模型（需要知道模型类）
-        # 这里假设baseline模型和当前模型是同一个类
-        baseline_model = current_model.__class__()
-        baseline_model.load_checkpoint(self.baseline_model_path)
-        baseline_model = baseline_model.to(self.device)
-        
-        # 临时替换为baseline模型
-        self.model = baseline_model
-        
-        # 评估baseline（不使用对比，避免递归）
-        test_loader = get_dataloader("test", batch_size=32, shuffle=False)
-        self.baseline_metrics = self.evaluate(test_loader)
-        
-        # 恢复当前模型
-        self.model = current_model
-        
-        print(f"✓ Baseline评估完成\n")
+
     
     def evaluate(self, test_loader: DataLoader) -> Dict[str, Any]:
         """
@@ -115,7 +96,6 @@ class Evaluator:
         Returns:
             评估指标字典
         """
-        self.model.eval()
         
         # 获取原始数据
         test_data_path = self.data_dir / "test.json"
@@ -128,10 +108,15 @@ class Evaluator:
         # 分场景收集预测结果
         scenario1_ring2_preds = []  # 场景1: Ring2预测
         scenario1_ring2_targets = []
+        scenario1_ring1_positions = []  # Ring1位置（用于计算Ring2的相对指标）
+        
         scenario1_ring3_preds = []  # 场景1: Ring3预测（基于预测的Ring2）
         scenario1_ring3_targets = []
+        scenario1_ring2_pred_positions = []  # 预测的Ring2位置（用于计算Ring3的相对指标）
+        
         scenario2_ring3_preds = []  # 场景2: Ring3预测（基于真实Ring2）
         scenario2_ring3_targets = []
+        scenario2_ring2_positions = []  # 真实Ring2位置（用于计算Ring3的相对指标）
         
         scenario1_maps = []
         scenario2_maps = []
@@ -145,60 +130,63 @@ class Evaluator:
                 map_name = item.get("map", "unknown")
                 
                 # 提取并归一化坐标
-                ring1 = torch.tensor([
-                    rings[0]["x"] / self.grid_size,
-                    rings[0]["y"] / self.grid_size,
-                    rings[0]["r"] / self.grid_size
-                ], dtype=torch.float32).to(self.device)
+                x1, y1, r1 = rings[0]["x"] / self.grid_size, rings[0]["y"] / self.grid_size, rings[0]["r"] / self.grid_size
+                x2, y2, r2 = rings[1]["x"] / self.grid_size, rings[1]["y"] / self.grid_size, rings[1]["r"] / self.grid_size
+                x3, y3, r3 = rings[2]["x"] / self.grid_size, rings[2]["y"] / self.grid_size, rings[2]["r"] / self.grid_size
                 
-                ring2_true = torch.tensor([
-                    rings[1]["x"] / self.grid_size,
-                    rings[1]["y"] / self.grid_size,
-                    rings[1]["r"] / self.grid_size
-                ], dtype=torch.float32)
+                # 准备输入数据
+                map_name = item.get("map", "unknown")
+                ring1_data = {"x": x1, "y": y1, "r": r1}
+                ring2_true_data = {"x": x2, "y": y2, "r": r2}
+                ring3_true = torch.tensor([x3, y3, r3], dtype=torch.float32)
                 
-                ring3_true = torch.tensor([
-                    rings[2]["x"] / self.grid_size,
-                    rings[2]["y"] / self.grid_size,
-                    rings[2]["r"] / self.grid_size
-                ], dtype=torch.float32)
-                
-                # 场景1：只提供Ring1
-                # 预测Ring2
-                input_ring1 = torch.cat([ring1, torch.zeros(3).to(self.device)])  # padding到6维
-                ring2_pred = self.model(input_ring1.unsqueeze(0)).squeeze(0).cpu()
+                # 场景1：只提供Ring1，预测Ring2和Ring3
+                ring2_pred_data, ring3_pred_data = self.predictor.predict(map_name, ring1_data)
+                ring2_pred = torch.tensor([ring2_pred_data["x"], ring2_pred_data["y"], ring2_pred_data["r"]], dtype=torch.float32)
+                ring2_true = torch.tensor([x2, y2, r2], dtype=torch.float32)
+                ring3_pred = torch.tensor([ring3_pred_data["x"], ring3_pred_data["y"], ring3_pred_data["r"]], dtype=torch.float32)
                 
                 scenario1_ring2_preds.append(ring2_pred)
                 scenario1_ring2_targets.append(ring2_true)
+                scenario1_ring1_positions.append(torch.tensor([x1, y1], dtype=torch.float32))
+                
+                scenario1_ring3_preds.append(ring3_pred)
+                scenario1_ring3_targets.append(ring3_true)
+                scenario1_ring2_pred_positions.append(torch.tensor([ring2_pred_data["x"], ring2_pred_data["y"]], dtype=torch.float32))
                 scenario1_maps.append(map_name)
                 
-                # 预测Ring3（使用预测的Ring2）
-                input_ring1_ring2_pred = torch.cat([ring1, ring2_pred.to(self.device)])
-                ring3_pred_from_pred = self.model(input_ring1_ring2_pred.unsqueeze(0)).squeeze(0).cpu()
+                # 场景2：提供Ring1+真实Ring2，预测Ring3
+                _, ring3_pred_s2_data = self.predictor.predict(map_name, ring1_data, ring2_true_data)
+                ring3_pred_s2 = torch.tensor([ring3_pred_s2_data["x"], ring3_pred_s2_data["y"], ring3_pred_s2_data["r"]], dtype=torch.float32)
                 
-                scenario1_ring3_preds.append(ring3_pred_from_pred)
-                scenario1_ring3_targets.append(ring3_true)
-                
-                # 场景2：提供Ring1+真实Ring2
-                input_ring1_ring2_true = torch.cat([ring1, ring2_true.to(self.device)])
-                ring3_pred_from_true = self.model(input_ring1_ring2_true.unsqueeze(0)).squeeze(0).cpu()
-                
-                scenario2_ring3_preds.append(ring3_pred_from_true)
+                scenario2_ring3_preds.append(ring3_pred_s2)
                 scenario2_ring3_targets.append(ring3_true)
+                scenario2_ring2_positions.append(torch.tensor([x2, y2], dtype=torch.float32))
                 scenario2_maps.append(map_name)
         
         # 转换为张量
         scenario1_ring2_preds = torch.stack(scenario1_ring2_preds)
         scenario1_ring2_targets = torch.stack(scenario1_ring2_targets)
+        scenario1_ring1_positions = torch.stack(scenario1_ring1_positions)
+        
         scenario1_ring3_preds = torch.stack(scenario1_ring3_preds)
         scenario1_ring3_targets = torch.stack(scenario1_ring3_targets)
+        scenario1_ring2_pred_positions = torch.stack(scenario1_ring2_pred_positions)
+        
         scenario2_ring3_preds = torch.stack(scenario2_ring3_preds)
         scenario2_ring3_targets = torch.stack(scenario2_ring3_targets)
+        scenario2_ring2_positions = torch.stack(scenario2_ring2_positions)
         
-        # 计算指标
-        scenario1_ring2_metrics = self._compute_metrics(scenario1_ring2_preds, scenario1_ring2_targets)
-        scenario1_ring3_metrics = self._compute_metrics(scenario1_ring3_preds, scenario1_ring3_targets)
-        scenario2_ring3_metrics = self._compute_metrics(scenario2_ring3_preds, scenario2_ring3_targets)
+        # 计算指标（传入前一个Ring的位置）
+        scenario1_ring2_metrics = self._compute_metrics(
+            scenario1_ring2_preds, scenario1_ring2_targets, scenario1_ring1_positions
+        )
+        scenario1_ring3_metrics = self._compute_metrics(
+            scenario1_ring3_preds, scenario1_ring3_targets, scenario1_ring2_pred_positions
+        )
+        scenario2_ring3_metrics = self._compute_metrics(
+            scenario2_ring3_preds, scenario2_ring3_targets, scenario2_ring2_positions
+        )
         
         # 按地图计算指标
         scenario1_ring2_by_map = self._compute_metrics_by_map(
@@ -228,35 +216,43 @@ class Evaluator:
             }
         }
     
-    def _compute_metrics(self, preds: torch.Tensor, targets: torch.Tensor) -> Dict[str, float]:
+    def _compute_metrics(
+        self, 
+        preds: torch.Tensor, 
+        targets: torch.Tensor,
+        prev_positions: torch.Tensor = None
+    ) -> Dict[str, float]:
         """
         计算评估指标
         
         Args:
-            preds: 预测值 (N, 3)
-            targets: 真实值 (N, 3)
+            preds: 预测值 (N, 3) - [x, y, r] 归一化坐标 (0-1)
+            targets: 真实值 (N, 3) - [x, y, r] 归一化坐标 (0-1)
+            prev_positions: 前一个Ring的位置 (N, 2) - [x_prev, y_prev]，用于计算相对位置指标
             
         Returns:
-            指标字典
+            指标字典（center_distance 和 radius_error 为像素值，其他为归一化值）
         """
-        # MSE
+        # MSE (归一化)
         mse = ((preds - targets) ** 2).mean().item()
         
-        # MAE
+        # MAE (归一化)
         mae = (preds - targets).abs().mean().item()
         
-        # RMSE
+        # RMSE (归一化)
         rmse = np.sqrt(mse)
         
-        # 圆心距离误差
+        # 圆心距离误差 (像素)
         center_pred = preds[:, :2]
         center_target = targets[:, :2]
         center_distance = torch.sqrt(((center_pred - center_target) ** 2).sum(dim=1)).mean().item()
+        center_distance_px = center_distance * self.grid_size
         
-        # 半径误差
+        # 半径误差 (像素)
         radius_error = (preds[:, 2] - targets[:, 2]).abs().mean().item()
+        radius_error_px = radius_error * self.grid_size
         
-        # 各维度误差
+        # 各维度误差 (归一化)
         x_error = (preds[:, 0] - targets[:, 0]).abs().mean().item()
         y_error = (preds[:, 1] - targets[:, 1]).abs().mean().item()
         r_error = radius_error
@@ -265,12 +261,48 @@ class Evaluator:
             "mse": mse,
             "mae": mae,
             "rmse": rmse,
-            "center_distance": center_distance,
-            "radius_error": radius_error,
+            "center_distance": center_distance_px,  # 像素
+            "radius_error": radius_error_px,        # 像素
             "x_error": x_error,
             "y_error": y_error,
             "r_error": r_error,
         }
+        
+        # 计算相对位置指标（如果提供了前一个Ring的位置）
+        if prev_positions is not None:
+            # 真实方向向量
+            dx_true = targets[:, 0] - prev_positions[:, 0]
+            dy_true = targets[:, 1] - prev_positions[:, 1]
+            
+            # 预测方向向量
+            dx_pred = preds[:, 0] - prev_positions[:, 0]
+            dy_pred = preds[:, 1] - prev_positions[:, 1]
+            
+            # 角度误差（归一化到 0-1，180度对称性）
+            angle_true = torch.atan2(dy_true, dx_true)
+            angle_pred = torch.atan2(dy_pred, dx_pred)
+            angle_diff = torch.abs(angle_pred - angle_true)
+            
+            # 考虑180度对称性：0度和180度等价
+            # 将角度差归一化到 [0, π/2]，再除以 π/2 得到 [0, 1]
+            angle_error = torch.min(angle_diff, 2 * np.pi - angle_diff)
+            angle_error = torch.min(angle_error, torch.abs(np.pi - angle_error))
+            angle_error_normalized = (angle_error / (np.pi / 2)).mean().item()
+            
+            # 距离误差比例（归一化到 0-1）
+            dist_true = torch.sqrt(dx_true**2 + dy_true**2)
+            dist_pred = torch.sqrt(dx_pred**2 + dy_pred**2)
+            
+            # 避免除零
+            valid_mask = dist_true > 1e-6
+            if valid_mask.sum() > 0:
+                distance_ratio = dist_pred[valid_mask] / dist_true[valid_mask]
+                distance_error_ratio = torch.abs(distance_ratio - 1.0).mean().item()
+            else:
+                distance_error_ratio = 0.0
+            
+            metrics["angle_error"] = angle_error_normalized
+            metrics["distance_error_ratio"] = distance_error_ratio
         
         return metrics
     
@@ -358,10 +390,27 @@ class Evaluator:
                 continue
             
             # 场景1：只提供Ring1，预测Ring2和Ring3
-            # 先预测Ring2
-            pred_ring2 = self._predict_ring2(rings[0])
-            # 再用预测的Ring2预测Ring3
-            pred_ring3_from_pred_ring2 = self._predict_ring3(rings[0], pred_ring2)
+            # 归一化坐标
+            ring1_norm = {
+                "x": rings[0]["x"] / self.grid_size,
+                "y": rings[0]["y"] / self.grid_size,
+                "r": rings[0]["r"] / self.grid_size
+            }
+            
+            # 使用predictor预测
+            pred_ring2_norm, pred_ring3_norm = self.predictor.predict(map_name, ring1_norm)
+            
+            # 转换回像素坐标
+            pred_ring2 = {
+                "x": int(pred_ring2_norm["x"] * self.grid_size),
+                "y": int(pred_ring2_norm["y"] * self.grid_size),
+                "r": int(pred_ring2_norm["r"] * self.grid_size)
+            }
+            pred_ring3_from_pred_ring2 = {
+                "x": int(pred_ring3_norm["x"] * self.grid_size),
+                "y": int(pred_ring3_norm["y"] * self.grid_size),
+                "r": int(pred_ring3_norm["r"] * self.grid_size)
+            }
             
             img_ring2_3 = self._draw_predictions(
                 map_name=map_name,
@@ -375,7 +424,21 @@ class Evaluator:
                 cv2.imwrite(str(output_file), img_ring2_3)
             
             # 场景2：提供Ring1+真实Ring2，预测Ring3
-            pred_ring3_from_true_ring2 = self._predict_ring3(rings[0], rings[1])
+            ring2_norm = {
+                "x": rings[1]["x"] / self.grid_size,
+                "y": rings[1]["y"] / self.grid_size,
+                "r": rings[1]["r"] / self.grid_size
+            }
+            
+            # 使用predictor预测
+            _, pred_ring3_s2_norm = self.predictor.predict(map_name, ring1_norm, ring2_norm)
+            
+            # 转换回像素坐标
+            pred_ring3_from_true_ring2 = {
+                "x": int(pred_ring3_s2_norm["x"] * self.grid_size),
+                "y": int(pred_ring3_s2_norm["y"] * self.grid_size),
+                "r": int(pred_ring3_s2_norm["r"] * self.grid_size)
+            }
             
             img_ring3 = self._draw_predictions(
                 map_name=map_name,
@@ -391,89 +454,6 @@ class Evaluator:
         print(f"可视化完成！保存到: {output_path}")
         print(f"  - ring2_3/: 场景1（预测Ring2+Ring3）")
         print(f"  - ring3/: 场景2（预测Ring3）")
-    
-    def _predict_ring2(self, ring1: Dict[str, float]) -> Dict[str, float]:
-        """
-        只预测 Ring2
-        
-        Args:
-            ring1: Ring1 数据
-            
-        Returns:
-            pred_ring2
-        """
-        self.model.eval()
-        
-        # 归一化
-        r1 = [ring1["x"] / self.grid_size, ring1["y"] / self.grid_size, ring1["r"] / self.grid_size]
-        
-        with torch.no_grad():
-            # 预测 Ring2（输入padding到6维）
-            input1 = torch.tensor(r1 + [0, 0, 0], dtype=torch.float32).unsqueeze(0).to(self.device)
-            output1 = self.model(input1).cpu().numpy()[0]
-        
-        # 反归一化
-        pred_ring2 = {
-            "x": int(output1[0] * self.grid_size),
-            "y": int(output1[1] * self.grid_size),
-            "r": int(output1[2] * self.grid_size)
-        }
-        
-        return pred_ring2
-    
-    def _predict_ring3(
-        self, 
-        ring1: Dict[str, float], 
-        ring2: Dict[str, float]
-    ) -> Dict[str, float]:
-        """
-        预测 Ring3
-        
-        Args:
-            ring1: Ring1 数据
-            ring2: Ring2 数据（可以是真实值或预测值）
-            
-        Returns:
-            pred_ring3
-        """
-        self.model.eval()
-        
-        # 归一化
-        r1 = [ring1["x"] / self.grid_size, ring1["y"] / self.grid_size, ring1["r"] / self.grid_size]
-        r2 = [ring2["x"] / self.grid_size, ring2["y"] / self.grid_size, ring2["r"] / self.grid_size]
-        
-        with torch.no_grad():
-            # 预测 Ring3
-            input2 = torch.tensor(r1 + r2, dtype=torch.float32).unsqueeze(0).to(self.device)
-            output2 = self.model(input2).cpu().numpy()[0]
-        
-        # 反归一化
-        pred_ring3 = {
-            "x": int(output2[0] * self.grid_size),
-            "y": int(output2[1] * self.grid_size),
-            "r": int(output2[2] * self.grid_size)
-        }
-        
-        return pred_ring3
-    
-    def _predict_rings(
-        self, 
-        ring1: Dict[str, float], 
-        ring2: Dict[str, float]
-    ) -> Tuple[Dict[str, float], Dict[str, float]]:
-        """
-        预测 Ring2 和 Ring3（保留用于兼容性）
-        
-        Args:
-            ring1: Ring1 数据
-            ring2: Ring2 数据（用于预测 Ring3）
-            
-        Returns:
-            (pred_ring2, pred_ring3)
-        """
-        pred_ring2 = self._predict_ring2(ring1)
-        pred_ring3 = self._predict_ring3(ring1, ring2)
-        return pred_ring2, pred_ring3
     
     def _draw_predictions(
         self,
@@ -560,44 +540,45 @@ class Evaluator:
         scenario1_ring3_metrics = scenario1.get("ring3_error", {})
         scenario2_ring3_metrics = scenario2.get("ring3_error", {})
         
-        # 获取baseline指标（如果有）
-        baseline_scenario1 = None
-        baseline_scenario2 = None
-        if self.baseline_metrics:
-            baseline_scenario1 = self.baseline_metrics.get("scenario_1_only_ring1", {})
-            baseline_scenario2 = self.baseline_metrics.get("scenario_2_ring1_and_ring2", {})
-        
-        # 打印半径误差（独立展示）
+        # 打印半径误差（按地图展示）
         print(f"\n{'='*70}")
         print("半径误差（理论上应为0）")
         print(f"{'='*70}")
         
+        # 获取按地图的指标
+        s1_r2_by_map = scenario1.get("by_map", {}).get("ring2_error", {})
+        s1_r3_by_map = scenario1.get("by_map", {}).get("ring3_error", {})
+        s2_r3_by_map = scenario2.get("by_map", {}).get("ring3_error", {})
+        
+        # 总体半径误差
         if ring2_metrics:
-            radius_err_px = ring2_metrics['radius_error'] * self.grid_size
-            if baseline_scenario1:
-                baseline_r2 = baseline_scenario1.get("ring2_error", {})
-                baseline_radius_px = baseline_r2.get('radius_error', 0) * self.grid_size
-                print(f"  场景1 - Ring2: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
-            else:
-                print(f"  场景1 - Ring2: {radius_err_px:.1f} px")
+            print(f"\n场景1 - Ring2: {ring2_metrics['radius_error']:.1f} px")
         
         if scenario1_ring3_metrics:
-            radius_err_px = scenario1_ring3_metrics['radius_error'] * self.grid_size
-            if baseline_scenario1:
-                baseline_r3 = baseline_scenario1.get("ring3_error", {})
-                baseline_radius_px = baseline_r3.get('radius_error', 0) * self.grid_size
-                print(f"  场景1 - Ring3: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
-            else:
-                print(f"  场景1 - Ring3: {radius_err_px:.1f} px")
+            print(f"场景1 - Ring3: {scenario1_ring3_metrics['radius_error']:.1f} px")
         
         if scenario2_ring3_metrics:
-            radius_err_px = scenario2_ring3_metrics['radius_error'] * self.grid_size
-            if baseline_scenario2:
-                baseline_r3 = baseline_scenario2.get("ring3_error", {})
-                baseline_radius_px = baseline_r3.get('radius_error', 0) * self.grid_size
-                print(f"  场景2 - Ring3: {radius_err_px:.1f} px ({baseline_radius_px:.1f} px)")
-            else:
-                print(f"  场景2 - Ring3: {radius_err_px:.1f} px")
+            print(f"场景2 - Ring3: {scenario2_ring3_metrics['radius_error']:.1f} px")
+        
+        # 按地图展示半径误差
+        all_maps = set()
+        all_maps.update(s1_r2_by_map.keys())
+        all_maps.update(s1_r3_by_map.keys())
+        all_maps.update(s2_r3_by_map.keys())
+        
+        if all_maps:
+            print(f"\n各地图半径误差:")
+            for map_name in sorted(all_maps):
+                print(f"\n  {map_name}:")
+                
+                if map_name in s1_r2_by_map:
+                    print(f"    场景1 - Ring2: {s1_r2_by_map[map_name]['radius_error']:.1f} px")
+                
+                if map_name in s1_r3_by_map:
+                    print(f"    场景1 - Ring3: {s1_r3_by_map[map_name]['radius_error']:.1f} px")
+                
+                if map_name in s2_r3_by_map:
+                    print(f"    场景2 - Ring3: {s2_r3_by_map[map_name]['radius_error']:.1f} px")
         
         # 场景1
         print(f"\n{'='*70}")
@@ -606,29 +587,15 @@ class Evaluator:
         
         # Ring2 误差
         if ring2_metrics:
-            center_dist_px = ring2_metrics['center_distance'] * self.grid_size
-            
             print(f"\nRing2 预测误差:")
-            if baseline_scenario1:
-                baseline_r2 = baseline_scenario1.get("ring2_error", {})
-                baseline_center_px = baseline_r2.get('center_distance', 0) * self.grid_size
-                print(f"  圆心距离误差: {center_dist_px:.1f} px ({baseline_center_px:.1f} px)")
-            else:
-                print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {ring2_metrics['center_distance']:.1f} px")
             print(f"  MSE:          {ring2_metrics['mse']:.6f}")
             print(f"  MAE:          {ring2_metrics['mae']:.6f}")
         
         # Ring3 误差（基于预测的Ring2）
         if scenario1_ring3_metrics:
-            center_dist_px = scenario1_ring3_metrics['center_distance'] * self.grid_size
-            
             print(f"\nRing3 预测误差（基于预测的Ring2）:")
-            if baseline_scenario1:
-                baseline_r3 = baseline_scenario1.get("ring3_error", {})
-                baseline_center_px = baseline_r3.get('center_distance', 0) * self.grid_size
-                print(f"  圆心距离误差: {center_dist_px:.1f} px ({baseline_center_px:.1f} px)")
-            else:
-                print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {scenario1_ring3_metrics['center_distance']:.1f} px")
             print(f"  MSE:          {scenario1_ring3_metrics['mse']:.6f}")
             print(f"  MAE:          {scenario1_ring3_metrics['mae']:.6f}")
         
@@ -638,14 +605,6 @@ class Evaluator:
             ring2_by_map = by_map.get("ring2_error", {})
             ring3_by_map = by_map.get("ring3_error", {})
             
-            # 获取baseline按地图的指标
-            baseline_r2_by_map = {}
-            baseline_r3_by_map = {}
-            if baseline_scenario1:
-                baseline_by_map = baseline_scenario1.get("by_map", {})
-                baseline_r2_by_map = baseline_by_map.get("ring2_error", {})
-                baseline_r3_by_map = baseline_by_map.get("ring3_error", {})
-            
             if ring2_by_map or ring3_by_map:
                 print(f"\n各地图详细结果:")
                 for map_name in sorted(set(list(ring2_by_map.keys()) + list(ring3_by_map.keys()))):
@@ -653,21 +612,11 @@ class Evaluator:
                     
                     if map_name in ring2_by_map:
                         r2_metrics = ring2_by_map[map_name]
-                        center_px = r2_metrics['center_distance'] * self.grid_size
-                        if map_name in baseline_r2_by_map:
-                            baseline_center_px = baseline_r2_by_map[map_name]['center_distance'] * self.grid_size
-                            print(f"    Ring2 圆心误差: {center_px:.1f} px ({baseline_center_px:.1f} px)")
-                        else:
-                            print(f"    Ring2 圆心误差: {center_px:.1f} px")
+                        print(f"    Ring2 圆心误差: {r2_metrics['center_distance']:.1f} px")
                     
                     if map_name in ring3_by_map:
                         r3_metrics = ring3_by_map[map_name]
-                        center_px = r3_metrics['center_distance'] * self.grid_size
-                        if map_name in baseline_r3_by_map:
-                            baseline_center_px = baseline_r3_by_map[map_name]['center_distance'] * self.grid_size
-                            print(f"    Ring3 圆心误差: {center_px:.1f} px ({baseline_center_px:.1f} px)")
-                        else:
-                            print(f"    Ring3 圆心误差: {center_px:.1f} px")
+                        print(f"    Ring3 圆心误差: {r3_metrics['center_distance']:.1f} px")
         
         # 场景2
         print(f"\n{'='*70}")
@@ -676,15 +625,8 @@ class Evaluator:
         
         # Ring3 误差（基于真实Ring2）
         if scenario2_ring3_metrics:
-            center_dist_px = scenario2_ring3_metrics['center_distance'] * self.grid_size
-            
             print(f"\nRing3 预测误差（基于真实Ring2）:")
-            if baseline_scenario2:
-                baseline_r3 = baseline_scenario2.get("ring3_error", {})
-                baseline_center_px = baseline_r3.get('center_distance', 0) * self.grid_size
-                print(f"  圆心距离误差: {center_dist_px:.1f} px ({baseline_center_px:.1f} px)")
-            else:
-                print(f"  圆心距离误差: {center_dist_px:.1f} px")
+            print(f"  圆心距离误差: {scenario2_ring3_metrics['center_distance']:.1f} px")
             print(f"  MSE:          {scenario2_ring3_metrics['mse']:.6f}")
             print(f"  MAE:          {scenario2_ring3_metrics['mae']:.6f}")
         
@@ -693,22 +635,11 @@ class Evaluator:
         if by_map:
             ring3_by_map = by_map.get("ring3_error", {})
             
-            # 获取baseline按地图的指标
-            baseline_r3_by_map = {}
-            if baseline_scenario2:
-                baseline_by_map = baseline_scenario2.get("by_map", {})
-                baseline_r3_by_map = baseline_by_map.get("ring3_error", {})
-            
             if ring3_by_map:
                 print(f"\n各地图详细结果:")
                 for map_name in sorted(ring3_by_map.keys()):
                     r3_metrics = ring3_by_map[map_name]
-                    center_px = r3_metrics['center_distance'] * self.grid_size
-                    if map_name in baseline_r3_by_map:
-                        baseline_center_px = baseline_r3_by_map[map_name]['center_distance'] * self.grid_size
-                        print(f"  {map_name} 圆心误差: {center_px:.1f} px ({baseline_center_px:.1f} px)")
-                    else:
-                        print(f"  {map_name} 圆心误差: {center_px:.1f} px")
+                    print(f"  {map_name} 圆心误差: {r3_metrics['center_distance']:.1f} px")
         
         print(f"{'='*70}\n")
 

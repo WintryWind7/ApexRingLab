@@ -1,4 +1,4 @@
-"""MLP Baseline训练脚本（One-Hot地图编码）"""
+"""深层MLP训练脚本"""
 
 import sys
 from pathlib import Path
@@ -6,43 +6,51 @@ sys.path.append(str(Path(__file__).parent.parent.parent))
 
 import torch
 import torch.optim as optim
-from mlp_baseline import MLPBaseline
-from predictor import BaselinePredictor
+from mlp_deep import MLPDeep, MLPVeryDeep
+from predictor import DeepMLPPredictor
 from model.dataset import get_dataloader
 from model.loss import get_loss_fn
 from model.trainer import Trainer
 from model.evaluator import Evaluator
 
 
-def train_baseline(show_scenario_errors: bool = False):
+def train_deep_mlp(depth: str = "deep"):
     """
-    训练MLP Baseline（One-Hot地图编码）
+    训练深层MLP
     
     Args:
-        show_scenario_errors: 是否在训练时显示场景误差（会降低训练速度）
+        depth: 'deep' 或 'very_deep'
     """
+    if depth == "deep":
+        model = MLPDeep()
+        desc = "8 → 256 → 128 → 64 → 32 → 3"
+    elif depth == "very_deep":
+        model = MLPVeryDeep()
+        desc = "8 → 512 → 256 → 256 → 128 → 128 → 64 → 32 → 3"
+    else:
+        raise ValueError(f"Unknown depth: {depth}")
+    
+    # 统一使用 checkpoints 目录，Trainer 会自动创建模型名子目录
+    save_dir = Path(__file__).parent / "checkpoints"
+    
     print(f"\n{'='*70}")
-    print(f"MLP Baseline实验（One-Hot地图编码）")
-    print(f"输入: 6维坐标 + 2维One-Hot地图编码")
-    if show_scenario_errors:
-        print(f"显示场景误差: 开启（训练会较慢）")
+    print(f"深层MLP实验 - {depth.upper()} - CircleLoss")
+    print(f"结构: {desc}")
+    print(f"损失: CircleLoss (alpha=2.0, beta=1.0)")
     print(f"{'='*70}\n")
     
-    # 数据（使用框架的dataset，默认use_map_encoding=True）
+    # 数据
     train_loader = get_dataloader("train", batch_size=32, shuffle=True)
     val_loader = get_dataloader("val", batch_size=32, shuffle=False)
     test_loader = get_dataloader("test", batch_size=32, shuffle=False)
     
     # 模型
-    model = MLPBaseline()
     model.summary()
     
-    # 训练
-    loss_fn = get_loss_fn("mse")
+    # 训练（使用CircleLoss，自动评估）
+    loss_fn = get_loss_fn("circle", alpha=2.0, beta=1.0)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
-    
-    save_dir = Path(__file__).parent / "checkpoints"
     
     trainer = Trainer(
         model=model,
@@ -56,24 +64,21 @@ def train_baseline(show_scenario_errors: bool = False):
         verbose=True,
         coordinate_mode="relative",
         use_onehot=True,
-        compute_scenario_errors=show_scenario_errors,
-        predictor_class=BaselinePredictor,  # 新增：自动评估
-        test_loader=test_loader,             # 新增：自动评估
-        auto_evaluate=True                   # 新增：自动评估
+        predictor_class=DeepMLPPredictor,  # 自动评估
+        test_loader=test_loader,
+        auto_evaluate=True
     )
     
-    trainer.train(num_epochs=100)
+    trainer.train(num_epochs=200)
     
-    # 可视化（评估已自动完成）
+    # 可视化
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    predictor = BaselinePredictor(model, device)
+    predictor = DeepMLPPredictor(model, device)
     evaluator = Evaluator(predictor=predictor, device=device)
-    
-    vis_dir = Path(__file__).parent / "visualizations"
-    print(f"\n生成可视化...")
+    vis_dir = Path(__file__).parent / "visualizations" / depth
     evaluator.visualize_predictions(output_dir=str(vis_dir))
     
-    print("\nBaseline实验完成！")
+    print(f"\n{depth.upper()}实验完成！")
     print(f"  模型: {save_dir / 'best_model.pth'}")
     print(f"  可视化: {vis_dir}")
 
@@ -82,8 +87,8 @@ if __name__ == "__main__":
     import argparse
     
     parser = argparse.ArgumentParser()
-    parser.add_argument("--show-errors", action="store_true", 
-                        help="在训练时显示场景误差（会降低训练速度）")
+    parser.add_argument("--depth", type=str, default="very_deep", choices=["deep", "very_deep"],
+                        help="模型深度")
     args = parser.parse_args()
     
-    train_baseline(show_scenario_errors=args.show_errors)
+    train_deep_mlp(args.depth)

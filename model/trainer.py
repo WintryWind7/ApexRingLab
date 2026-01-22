@@ -48,9 +48,14 @@ class Trainer:
         save_dir: str = "checkpoints",
         early_stopping_patience: int = 10,
         verbose: bool = True,
-        auto_evaluate: bool = True,
+        coordinate_mode: str = "relative",
+        map_filter: Optional[str] = None,
+        use_onehot: bool = False,
+        extra_feature_dims: int = 0,
+        compute_scenario_errors: bool = False,
+        predictor_class: Optional[type] = None,
         test_loader: Optional[DataLoader] = None,
-        baseline_model_path: Optional[str] = None
+        auto_evaluate: bool = True
     ):
         """
         初始化训练器
@@ -66,9 +71,14 @@ class Trainer:
             save_dir: 检查点保存目录
             early_stopping_patience: 早停耐心值
             verbose: 是否打印详细信息
-            auto_evaluate: 训练完成后是否自动评估（包含可视化）
-            test_loader: 测试数据加载器（用于自动评估）
-            baseline_model_path: baseline模型路径（用于对比评估）
+            coordinate_mode: 坐标模式 ('absolute' 或 'relative')
+            map_filter: 地图过滤器（用于分地图模型验证）
+            use_onehot: 是否使用One-Hot地图编码
+            extra_feature_dims: 额外特征维度（如距离特征）
+            compute_scenario_errors: 是否计算场景误差（会显著降低训练速度，默认False）
+            predictor_class: Predictor类（用于训练后自动评估）
+            test_loader: 测试数据加载器（用于训练后自动评估）
+            auto_evaluate: 是否在训练完成后自动评估（默认True）
         """
         self.model = model.to(device)
         self.train_loader = train_loader
@@ -77,17 +87,24 @@ class Trainer:
         self.optimizer = optimizer
         self.device = device
         self.scheduler = scheduler
-        self.save_dir = Path(save_dir)
+        # 自动在 save_dir 下创建以模型名命名的子目录
+        self.save_dir = Path(save_dir) / model.model_name
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.early_stopping_patience = early_stopping_patience
         self.verbose = verbose
-        self.auto_evaluate = auto_evaluate
+        self.coordinate_mode = coordinate_mode
+        self.map_filter = map_filter
+        self.use_onehot = use_onehot
+        self.extra_feature_dims = extra_feature_dims
+        self.compute_scenario_errors = compute_scenario_errors
+        self.predictor_class = predictor_class
         self.test_loader = test_loader
-        self.baseline_model_path = baseline_model_path
+        self.auto_evaluate = auto_evaluate
         
         # 训练状态
         self.current_epoch = 0
         self.best_val_loss = float("inf")
+        self.best_epoch = 0  # 新增：记录最佳模型的轮数
         self.patience_counter = 0
         self.history = {
             "train_loss": [],
@@ -160,8 +177,11 @@ class Trainer:
         
         avg_loss = total_loss / num_batches
         
-        # 计算场景误差（使用简化的评估）
-        scenario1_error, scenario2_error = self._compute_scenario_errors()
+        # 只在需要时计算场景误差（会显著降低训练速度）
+        if self.compute_scenario_errors:
+            scenario1_error, scenario2_error = self._compute_scenario_errors()
+        else:
+            scenario1_error, scenario2_error = 0.0, 0.0
         
         return avg_loss, scenario1_error, scenario2_error
     
@@ -174,6 +194,12 @@ class Trainer:
         """
         import json
         from pathlib import Path
+        
+        # 地图到One-Hot的映射
+        MAP_TO_ONEHOT = {
+            "mp_rr_district": [1.0, 0.0],
+            "mp_rr_tropic": [0.0, 1.0]
+        }
         
         # 读取验证集原始数据
         data_dir = Path(__file__).parent.parent / "data" / "use"
@@ -188,47 +214,140 @@ class Trainer:
         
         with torch.no_grad():
             for item in val_data:
+                map_name = item.get("map", "")
+                
+                # 排除的地图
+                if map_name in ["mp_rr_desertlands_hu"]:
+                    continue
+                
+                # 地图过滤（用于分地图模型）
+                if self.map_filter and map_name != self.map_filter:
+                    continue
+                
                 rings = item.get("rings", [])
                 if len(rings) < 3:
                     continue
                 
                 # 归一化
-                ring1 = torch.tensor([
-                    rings[0]["x"] / grid_size,
-                    rings[0]["y"] / grid_size,
-                    rings[0]["r"] / grid_size
-                ], dtype=torch.float32).to(self.device)
+                x1, y1, r1 = rings[0]["x"] / grid_size, rings[0]["y"] / grid_size, rings[0]["r"] / grid_size
+                x2, y2, r2 = rings[1]["x"] / grid_size, rings[1]["y"] / grid_size, rings[1]["r"] / grid_size
+                x3, y3, r3 = rings[2]["x"] / grid_size, rings[2]["y"] / grid_size, rings[2]["r"] / grid_size
                 
-                ring2_true = torch.tensor([
-                    rings[1]["x"] / grid_size,
-                    rings[1]["y"] / grid_size,
-                    rings[1]["r"] / grid_size
-                ], dtype=torch.float32).to(self.device)
+                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
+                x3, y3, r3 = rings[2]["x"] / grid_size, rings[2]["y"] / grid_size, rings[2]["r"] / grid_size
                 
-                ring3_true = torch.tensor([
-                    rings[2]["x"] / grid_size,
-                    rings[2]["y"] / grid_size,
-                    rings[2]["r"] / grid_size
-                ], dtype=torch.float32)
+                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
                 
-                # 场景1：只给Ring1，预测Ring2再预测Ring3
-                input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
-                ring2_pred = self.model(input1).squeeze(0)
+                # One-Hot编码（如果需要）
+                if self.use_onehot:
+                    if map_name in MAP_TO_ONEHOT:
+                        map_onehot = torch.tensor(MAP_TO_ONEHOT[map_name], dtype=torch.float32).to(self.device)
+                    else:
+                        # 未知地图，跳过
+                        continue
                 
-                input2 = torch.cat([ring1, ring2_pred]).unsqueeze(0)
-                ring3_pred_s1 = self.model(input2).squeeze(0).cpu()
+                if self.coordinate_mode == "absolute":
+                    # 绝对坐标模式
+                    ring2_true = torch.tensor([x2, y2, r2], dtype=torch.float32).to(self.device)
+                    ring3_true = torch.tensor([x3, y3, r3], dtype=torch.float32)
+                    
+                    # 场景1：只给Ring1，预测Ring2再预测Ring3
+                    if self.use_onehot:
+                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device), map_onehot]).unsqueeze(0)
+                    else:
+                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
+                    
+                    ring2_pred = self.model(input1).squeeze(0)
+                    
+                    if self.use_onehot:
+                        input2 = torch.cat([ring1, ring2_pred, map_onehot]).unsqueeze(0)
+                    else:
+                        input2 = torch.cat([ring1, ring2_pred]).unsqueeze(0)
+                    
+                    ring3_pred_s1 = self.model(input2).squeeze(0).cpu()
+                    
+                    # 计算场景1的Ring3误差
+                    center_error_s1 = torch.sqrt(((ring3_pred_s1[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
+                    scenario1_errors.append(center_error_s1)
+                    
+                    # 场景2：给Ring1+Ring2，预测Ring3
+                    if self.use_onehot:
+                        input3 = torch.cat([ring1, ring2_true, map_onehot]).unsqueeze(0)
+                    else:
+                        input3 = torch.cat([ring1, ring2_true]).unsqueeze(0)
+                    
+                    ring3_pred_s2 = self.model(input3).squeeze(0).cpu()
+                    
+                    # 计算场景2的Ring3误差
+                    center_error_s2 = torch.sqrt(((ring3_pred_s2[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
+                    scenario2_errors.append(center_error_s2)
                 
-                # 计算场景1的Ring3误差
-                center_error_s1 = torch.sqrt(((ring3_pred_s1[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
-                scenario1_errors.append(center_error_s1)
-                
-                # 场景2：给Ring1+Ring2，预测Ring3
-                input3 = torch.cat([ring1, ring2_true]).unsqueeze(0)
-                ring3_pred_s2 = self.model(input3).squeeze(0).cpu()
-                
-                # 计算场景2的Ring3误差
-                center_error_s2 = torch.sqrt(((ring3_pred_s2[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
-                scenario2_errors.append(center_error_s2)
+                elif self.coordinate_mode == "relative":
+                    # 相对坐标模式
+                    # 场景1：只给Ring1，预测Ring2（相对坐标）再预测Ring3（相对坐标）
+                    if self.use_onehot:
+                        input1 = torch.cat([map_onehot, ring1, torch.zeros(3 + self.extra_feature_dims).to(self.device)]).unsqueeze(0)
+                    else:
+                        input1 = torch.cat([ring1, torch.zeros(3 + self.extra_feature_dims).to(self.device)]).unsqueeze(0)
+                    
+                    ring2_pred_rel = self.model(input1).squeeze(0)  # [dx2, dy2, r2]
+                    
+                    # 转换为绝对坐标（保持在GPU上用于下一步预测）
+                    ring2_pred_abs_x = ring1[0].item() + ring2_pred_rel[0].item()
+                    ring2_pred_abs_y = ring1[1].item() + ring2_pred_rel[1].item()
+                    
+                    # 预测Ring3（相对Ring2）
+                    if self.use_onehot:
+                        # 如果有额外特征，用0填充
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input2 = torch.cat([map_onehot, ring1, ring2_pred_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input2 = torch.cat([map_onehot, ring1, ring2_pred_rel]).unsqueeze(0)
+                    else:
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input2 = torch.cat([ring1, ring2_pred_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input2 = torch.cat([ring1, ring2_pred_rel]).unsqueeze(0)
+                    
+                    ring3_pred_rel = self.model(input2).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
+                    
+                    # 转换为绝对坐标
+                    ring3_pred_abs_x = ring2_pred_abs_x + ring3_pred_rel[0].item()
+                    ring3_pred_abs_y = ring2_pred_abs_y + ring3_pred_rel[1].item()
+                    
+                    # 计算场景1的Ring3误差
+                    center_error_s1 = ((ring3_pred_abs_x - x3) ** 2 + (ring3_pred_abs_y - y3) ** 2) ** 0.5 * grid_size
+                    scenario1_errors.append(center_error_s1)
+                    
+                    # 场景2：给Ring1+Ring2（真实），预测Ring3
+                    dx2_true, dy2_true = x2 - x1, y2 - y1
+                    ring2_true_rel = torch.tensor([dx2_true, dy2_true, r2], dtype=torch.float32).to(self.device)
+                    
+                    if self.use_onehot:
+                        # 如果有额外特征，用0填充
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input3 = torch.cat([map_onehot, ring1, ring2_true_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input3 = torch.cat([map_onehot, ring1, ring2_true_rel]).unsqueeze(0)
+                    else:
+                        if self.extra_feature_dims > 0:
+                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
+                            input3 = torch.cat([ring1, ring2_true_rel, extra_features]).unsqueeze(0)
+                        else:
+                            input3 = torch.cat([ring1, ring2_true_rel]).unsqueeze(0)
+                    
+                    ring3_pred_rel_s2 = self.model(input3).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
+                    
+                    # 转换为绝对坐标
+                    ring3_pred_abs_x_s2 = x2 + ring3_pred_rel_s2[0].item()
+                    ring3_pred_abs_y_s2 = y2 + ring3_pred_rel_s2[1].item()
+                    
+                    # 计算场景2的Ring3误差
+                    center_error_s2 = ((ring3_pred_abs_x_s2 - x3) ** 2 + (ring3_pred_abs_y_s2 - y3) ** 2) ** 0.5 * grid_size
+                    scenario2_errors.append(center_error_s2)
         
         avg_s1 = sum(scenario1_errors) / len(scenario1_errors) if scenario1_errors else 0
         avg_s2 = sum(scenario2_errors) / len(scenario2_errors) if scenario2_errors else 0
@@ -250,11 +369,6 @@ class Trainer:
             print(f"训练样本: {len(self.train_loader.dataset)}")
             print(f"验证样本: {len(self.val_loader.dataset)}")
             print(f"{'='*60}\n")
-        
-        # 创建训练日志文件
-        log_file = self.save_dir / "training_log.txt"
-        with open(log_file, "w", encoding="utf-8") as f:
-            f.write("Epoch\tTrain\tVal\tR3(S1)\tR3(S2)\tBest\n")
         
         for epoch in range(num_epochs):
             self.current_epoch = epoch + 1
@@ -280,6 +394,7 @@ class Trainer:
             is_best = False
             if val_loss < self.best_val_loss:
                 self.best_val_loss = val_loss
+                self.best_epoch = self.current_epoch  # 记录最佳轮数
                 self.patience_counter = 0
                 self.save_checkpoint("best_model.pth")
                 is_best = True
@@ -288,23 +403,19 @@ class Trainer:
             
             # 打印信息
             if self.verbose:
-                best_mark = " ✓" if is_best else ""
-                print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
-                      f"Train: {train_loss:.6f}\t"
-                      f"Val: {val_loss:.6f}\t"
-                      f"R3(S1): {scenario1_error:4.0f}px\t"
-                      f"R3(S2): {scenario2_error:4.0f}px"
-                      f"{best_mark}")
-            
-            # 写入日志
-            with open(log_file, "a", encoding="utf-8") as f:
-                best_mark = "✓" if is_best else ""
-                f.write(f"{self.current_epoch:3d}\t"
-                       f"{train_loss:.6f}\t"
-                       f"{val_loss:.6f}\t"
-                       f"{scenario1_error:4.0f}\t"
-                       f"{scenario2_error:4.0f}\t"
-                       f"{best_mark}\n")
+                best_mark = " *" if is_best else ""
+                if self.compute_scenario_errors:
+                    print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
+                          f"Train: {train_loss:.6f}\t"
+                          f"Val: {val_loss:.6f}\t"
+                          f"R3(S1): {scenario1_error:4.0f}px\t"
+                          f"R3(S2): {scenario2_error:4.0f}px"
+                          f"{best_mark}")
+                else:
+                    print(f"Epoch {self.current_epoch:3d}/{num_epochs}\t"
+                          f"Train: {train_loss:.6f}\t"
+                          f"Val: {val_loss:.6f}"
+                          f"{best_mark}")
             
             # 早停
             if self.patience_counter >= self.early_stopping_patience:
@@ -317,52 +428,11 @@ class Trainer:
             print(f"训练完成！最佳验证损失: {self.best_val_loss:.6f}")
             print(f"{'='*60}\n")
         
-        # 自动评估
-        if self.auto_evaluate and self.test_loader is not None:
+        # 训练完成后自动评估
+        if self.auto_evaluate and self.predictor_class and self.test_loader:
             self._auto_evaluate()
         
         return self.history
-    
-    def _auto_evaluate(self) -> None:
-        """
-        训练完成后自动评估（包含可视化）
-        """
-        if self.verbose:
-            print("开始自动评估...")
-        
-        # 加载最佳模型
-        best_model_path = self.save_dir / "best_model.pth"
-        if best_model_path.exists():
-            self.model.load_checkpoint(str(best_model_path))
-            if self.verbose:
-                print(f"已加载最佳模型: {best_model_path}")
-        
-        # 导入评估器
-        from model.evaluator import Evaluator
-        
-        # 创建评估器（传入baseline路径）
-        evaluator = Evaluator(
-            self.model, 
-            device=self.device,
-            baseline_model_path=self.baseline_model_path
-        )
-        
-        # 评估
-        if self.verbose:
-            print("\n评估模型...")
-        metrics = evaluator.evaluate(self.test_loader)
-        evaluator.print_metrics(metrics)
-        
-        # 可视化
-        vis_dir = self.save_dir.parent / "visualizations"
-        if self.verbose:
-            print(f"\n生成可视化...")
-        evaluator.visualize_predictions(output_dir=str(vis_dir))
-        
-        if self.verbose:
-            print(f"\n评估完成！")
-            print(f"  模型: {best_model_path}")
-            print(f"  可视化: {vis_dir}")
     
     def save_checkpoint(self, filename: str) -> None:
         """
@@ -379,8 +449,10 @@ class Trainer:
             optimizer_state=self.optimizer.state_dict(),
             metrics={
                 "best_val_loss": self.best_val_loss,
+                "best_epoch": self.best_epoch,  # 新增：最佳模型的轮数
                 "train_loss": self.history["train_loss"][-1] if self.history["train_loss"] else None,
                 "val_loss": self.history["val_loss"][-1] if self.history["val_loss"] else None,
+                "history": self.history  # 保存完整训练历史
             }
         )
     
@@ -405,6 +477,68 @@ class Trainer:
             self.best_val_loss = metrics.get("best_val_loss", float("inf"))
         
         self.current_epoch = epoch
+    
+    def _auto_evaluate(self) -> None:
+        """
+        训练完成后自动评估并保存结果到pth
+        """
+        from model.evaluator import Evaluator
+        import os
+        from datetime import datetime
+        
+        if self.verbose:
+            print(f"\n{'='*70}")
+            print(f"开始自动评估...")
+            print(f"{'='*70}\n")
+        
+        # 加载最佳模型
+        best_model_path = self.save_dir / "best_model.pth"
+        self.model.load_checkpoint(str(best_model_path))
+        
+        # 创建 Predictor 和 Evaluator
+        predictor = self.predictor_class(self.model, self.device)
+        evaluator = Evaluator(predictor=predictor, device=self.device)
+        
+        # 获取测试集版本（最后修改时间）
+        test_json_path = Path(__file__).parent.parent / "data" / "use" / "test.json"
+        test_dataset_version = None
+        if test_json_path.exists():
+            test_mtime = os.path.getmtime(test_json_path)
+            test_dataset_version = datetime.fromtimestamp(test_mtime).strftime("%Y-%m-%d %H:%M:%S")
+        
+        # 评估
+        eval_start_time = datetime.now()
+        test_metrics = evaluator.evaluate(self.test_loader)
+        eval_end_time = datetime.now()
+        evaluator.print_metrics(test_metrics)
+        
+        # 添加测试元信息
+        test_metrics_with_meta = {
+            "evaluated_at": eval_end_time.strftime("%Y-%m-%d %H:%M:%S"),
+            "test_dataset_version": test_dataset_version,
+            "evaluation_duration_seconds": (eval_end_time - eval_start_time).total_seconds(),
+            "metrics": test_metrics
+        }
+        
+        # 重新保存带测试结果的模型
+        self.model.save_checkpoint(
+            path=str(best_model_path),
+            epoch=self.best_epoch,  # 使用最佳模型的轮数
+            optimizer_state=self.optimizer.state_dict(),
+            metrics={
+                "best_val_loss": self.best_val_loss,
+                "best_epoch": self.best_epoch,  # 最佳模型的轮数
+                "train_loss": self.history["train_loss"][-1] if self.history["train_loss"] else None,
+                "val_loss": self.history["val_loss"][-1] if self.history["val_loss"] else None,
+                "history": self.history  # 保存完整训练历史
+            },
+            test_metrics=test_metrics_with_meta  # 提到顶层
+        )
+        
+        if self.verbose:
+            print(f"\n测试结果已写入: {best_model_path}")
+            print(f"评估时间: {test_metrics_with_meta['evaluated_at']}")
+            print(f"测试集版本: {test_dataset_version}\n")
 
 
 if __name__ == "__main__":
