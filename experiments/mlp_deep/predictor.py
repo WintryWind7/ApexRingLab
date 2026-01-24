@@ -18,8 +18,8 @@ class DeepMLPPredictor(Predictor):
         "mp_rr_tropic": [0.0, 1.0]
     }
     
-    def __init__(self, model, device: str = "cuda"):
-        super().__init__(device)
+    def __init__(self, model, device: str = "cuda", grid_size: int = 16384):
+        super().__init__(device, grid_size)
         self.model = model.to(device)
         self.model.eval()
     
@@ -29,17 +29,21 @@ class DeepMLPPredictor(Predictor):
         
         Args:
             map_name: 地图名称
-            ring1_data: {"x": x1, "y": y1, "r": r1} (归一化坐标)
+            ring1_data: {"x": x1, "y": y1, "r": r1} (原始坐标)
             ring2_data: Ring2数据（可选）
         
         Returns:
-            (ring2_dict, ring3_dict): 绝对坐标
+            (ring2_dict, ring3_dict): 原始坐标
         """
         if map_name not in self.MAP_TO_ONEHOT:
             raise ValueError(f"未知地图: {map_name}")
         
         map_onehot = torch.tensor(self.MAP_TO_ONEHOT[map_name], dtype=torch.float32).to(self.device)
-        x1, y1, r1 = ring1_data["x"], ring1_data["y"], ring1_data["r"]
+        
+        # 归一化输入
+        x1 = ring1_data["x"] / self.grid_size
+        y1 = ring1_data["y"] / self.grid_size
+        r1 = ring1_data["r"] / self.grid_size
         
         with torch.no_grad():
             if ring2_data is None:
@@ -61,14 +65,17 @@ class DeepMLPPredictor(Predictor):
                 dx3, dy3, r3 = output2[0], output2[1], output2[2]
                 x3, y3 = x2 + dx3, y2 + dy3
                 
+                # 反归一化
                 return (
-                    {"x": float(x2), "y": float(y2), "r": float(r2)},
-                    {"x": float(x3), "y": float(y3), "r": float(r3)}
+                    {"x": int(x2 * self.grid_size), "y": int(y2 * self.grid_size), "r": int(r2 * self.grid_size)},
+                    {"x": int(x3 * self.grid_size), "y": int(y3 * self.grid_size), "r": int(r3 * self.grid_size)}
                 )
             
             else:
                 # 场景2：给Ring1+Ring2，预测Ring3
-                x2, y2, r2 = ring2_data["x"], ring2_data["y"], ring2_data["r"]
+                x2 = ring2_data["x"] / self.grid_size
+                y2 = ring2_data["y"] / self.grid_size
+                r2 = ring2_data["r"] / self.grid_size
                 dx2, dy2 = x2 - x1, y2 - y1
                 
                 ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
@@ -79,7 +86,8 @@ class DeepMLPPredictor(Predictor):
                 dx3, dy3, r3 = output2[0], output2[1], output2[2]
                 x3, y3 = x2 + dx3, y2 + dy3
                 
+                # 反归一化
                 return (
-                    {"x": float(x2), "y": float(y2), "r": float(r2)},
-                    {"x": float(x3), "y": float(y3), "r": float(r3)}
+                    {"x": int(ring2_data["x"]), "y": int(ring2_data["y"]), "r": int(ring2_data["r"])},
+                    {"x": int(x3 * self.grid_size), "y": int(y3 * self.grid_size), "r": int(r3 * self.grid_size)}
                 )

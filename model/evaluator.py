@@ -4,7 +4,6 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import json
-import cv2
 import numpy as np
 from pathlib import Path
 from typing import Dict, Any, Optional, List, Tuple
@@ -14,19 +13,10 @@ from typing import Dict, Any, Optional, List, Tuple
 # 获取项目根目录（evaluator.py在model/目录下，需要向上一级）
 PROJECT_ROOT = Path(__file__).parent.parent
 DATA_DIR = PROJECT_ROOT / "data" / "use"
-TEST_RINGS_DIR = PROJECT_ROOT / "data" / "use" / "test_rings"
-MAP_DIR = PROJECT_ROOT / "data" / "map"
 GRID_SIZE = 16384
 
 # 排除的地图
 EXCLUDED_MAPS = ["mp_rr_desertlands_hu"]
-
-# 地图文件映射
-MAP_FILES = {
-    "mp_rr_desertlands_hu": "mp_rr_desertlands_hu.png",
-    "mp_rr_district": "mp_rr_district.png",
-    "mp_rr_tropic": "mp_rr_tropic_island_mu2.png",
-}
 # ==================================================
 
 
@@ -35,8 +25,7 @@ class Evaluator:
     模型评估器
     
     功能：
-    1. 计算评估指标（使用 test.json）
-    2. 可视化预测结果（使用 test_rings/）
+    计算评估指标（使用 test.json）
     """
     
     def __init__(
@@ -45,8 +34,6 @@ class Evaluator:
         model: nn.Module = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
         data_dir: Path = DATA_DIR,
-        test_rings_dir: Path = TEST_RINGS_DIR,
-        map_dir: Path = MAP_DIR,
         coordinate_mode: str = "relative"
     ):
         """
@@ -57,14 +44,10 @@ class Evaluator:
             model: 模型（如果未提供predictor，则从model创建默认predictor）
             device: 设备
             data_dir: 数据目录（Path对象）
-            test_rings_dir: 测试样本目录（Path对象）
-            map_dir: 地图目录（Path对象）
             coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         """
         self.device = device
         self.data_dir = Path(data_dir)
-        self.test_rings_dir = Path(test_rings_dir)
-        self.map_dir = Path(map_dir)
         self.grid_size = GRID_SIZE
         self.coordinate_mode = coordinate_mode
         
@@ -129,39 +112,55 @@ class Evaluator:
                 
                 map_name = item.get("map", "unknown")
                 
-                # 提取并归一化坐标
-                x1, y1, r1 = rings[0]["x"] / self.grid_size, rings[0]["y"] / self.grid_size, rings[0]["r"] / self.grid_size
-                x2, y2, r2 = rings[1]["x"] / self.grid_size, rings[1]["y"] / self.grid_size, rings[1]["r"] / self.grid_size
-                x3, y3, r3 = rings[2]["x"] / self.grid_size, rings[2]["y"] / self.grid_size, rings[2]["r"] / self.grid_size
+                # 提取原始坐标
+                x1, y1, r1 = rings[0]["x"], rings[0]["y"], rings[0]["r"]
+                x2, y2, r2 = rings[1]["x"], rings[1]["y"], rings[1]["r"]
+                x3, y3, r3 = rings[2]["x"], rings[2]["y"], rings[2]["r"]
                 
-                # 准备输入数据
-                map_name = item.get("map", "unknown")
+                # 准备输入数据（原始坐标）
                 ring1_data = {"x": x1, "y": y1, "r": r1}
                 ring2_true_data = {"x": x2, "y": y2, "r": r2}
-                ring3_true = torch.tensor([x3, y3, r3], dtype=torch.float32)
                 
                 # 场景1：只提供Ring1，预测Ring2和Ring3
                 ring2_pred_data, ring3_pred_data = self.predictor.predict(map_name, ring1_data)
-                ring2_pred = torch.tensor([ring2_pred_data["x"], ring2_pred_data["y"], ring2_pred_data["r"]], dtype=torch.float32)
-                ring2_true = torch.tensor([x2, y2, r2], dtype=torch.float32)
-                ring3_pred = torch.tensor([ring3_pred_data["x"], ring3_pred_data["y"], ring3_pred_data["r"]], dtype=torch.float32)
+                
+                # 归一化用于计算（模型内部使用归一化坐标）
+                ring2_pred = torch.tensor([
+                    ring2_pred_data["x"] / self.grid_size,
+                    ring2_pred_data["y"] / self.grid_size,
+                    ring2_pred_data["r"] / self.grid_size
+                ], dtype=torch.float32)
+                ring2_true = torch.tensor([x2 / self.grid_size, y2 / self.grid_size, r2 / self.grid_size], dtype=torch.float32)
+                ring3_pred = torch.tensor([
+                    ring3_pred_data["x"] / self.grid_size,
+                    ring3_pred_data["y"] / self.grid_size,
+                    ring3_pred_data["r"] / self.grid_size
+                ], dtype=torch.float32)
+                ring3_true = torch.tensor([x3 / self.grid_size, y3 / self.grid_size, r3 / self.grid_size], dtype=torch.float32)
                 
                 scenario1_ring2_preds.append(ring2_pred)
                 scenario1_ring2_targets.append(ring2_true)
-                scenario1_ring1_positions.append(torch.tensor([x1, y1], dtype=torch.float32))
+                scenario1_ring1_positions.append(torch.tensor([x1 / self.grid_size, y1 / self.grid_size], dtype=torch.float32))
                 
                 scenario1_ring3_preds.append(ring3_pred)
                 scenario1_ring3_targets.append(ring3_true)
-                scenario1_ring2_pred_positions.append(torch.tensor([ring2_pred_data["x"], ring2_pred_data["y"]], dtype=torch.float32))
+                scenario1_ring2_pred_positions.append(torch.tensor([
+                    ring2_pred_data["x"] / self.grid_size,
+                    ring2_pred_data["y"] / self.grid_size
+                ], dtype=torch.float32))
                 scenario1_maps.append(map_name)
                 
                 # 场景2：提供Ring1+真实Ring2，预测Ring3
                 _, ring3_pred_s2_data = self.predictor.predict(map_name, ring1_data, ring2_true_data)
-                ring3_pred_s2 = torch.tensor([ring3_pred_s2_data["x"], ring3_pred_s2_data["y"], ring3_pred_s2_data["r"]], dtype=torch.float32)
+                ring3_pred_s2 = torch.tensor([
+                    ring3_pred_s2_data["x"] / self.grid_size,
+                    ring3_pred_s2_data["y"] / self.grid_size,
+                    ring3_pred_s2_data["r"] / self.grid_size
+                ], dtype=torch.float32)
                 
                 scenario2_ring3_preds.append(ring3_pred_s2)
                 scenario2_ring3_targets.append(ring3_true)
-                scenario2_ring2_positions.append(torch.tensor([x2, y2], dtype=torch.float32))
+                scenario2_ring2_positions.append(torch.tensor([x2 / self.grid_size, y2 / self.grid_size], dtype=torch.float32))
                 scenario2_maps.append(map_name)
         
         # 转换为张量
@@ -342,189 +341,6 @@ class Evaluator:
         
         return map_metrics
     
-    def visualize_predictions(self, output_dir: str = "results/visualizations") -> None:
-        """
-        可视化预测结果（使用 test_rings/）
-        
-        分两种场景输出：
-        - ring2_3/: 场景1 - 只提供Ring1，预测Ring2和Ring3
-        - ring3/: 场景2 - 提供Ring1+Ring2，预测Ring3
-        
-        在地图上绘制：
-        - 真实圈（白色）
-        - 预测圈（黄色）
-        
-        Args:
-            output_dir: 输出目录
-        """
-        output_path = Path(output_dir)
-        
-        # 创建两个子目录
-        ring2_3_dir = output_path / "ring2_3"
-        ring3_dir = output_path / "ring3"
-        
-        # 清空旧文件
-        if ring2_3_dir.exists():
-            import shutil
-            shutil.rmtree(ring2_3_dir)
-        if ring3_dir.exists():
-            import shutil
-            shutil.rmtree(ring3_dir)
-        
-        ring2_3_dir.mkdir(parents=True, exist_ok=True)
-        ring3_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 获取所有测试样本，排除指定地图
-        json_files = sorted(self.test_rings_dir.glob("*.json"))
-        json_files = [f for f in json_files if not any(excluded in f.stem for excluded in EXCLUDED_MAPS)]
-        
-        for json_file in json_files:
-            # 加载数据
-            with open(json_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-            
-            map_name = data.get("map")
-            rings = data.get("rings", [])
-            
-            if len(rings) < 3:
-                continue
-            
-            # 场景1：只提供Ring1，预测Ring2和Ring3
-            # 归一化坐标
-            ring1_norm = {
-                "x": rings[0]["x"] / self.grid_size,
-                "y": rings[0]["y"] / self.grid_size,
-                "r": rings[0]["r"] / self.grid_size
-            }
-            
-            # 使用predictor预测
-            pred_ring2_norm, pred_ring3_norm = self.predictor.predict(map_name, ring1_norm)
-            
-            # 转换回像素坐标
-            pred_ring2 = {
-                "x": int(pred_ring2_norm["x"] * self.grid_size),
-                "y": int(pred_ring2_norm["y"] * self.grid_size),
-                "r": int(pred_ring2_norm["r"] * self.grid_size)
-            }
-            pred_ring3_from_pred_ring2 = {
-                "x": int(pred_ring3_norm["x"] * self.grid_size),
-                "y": int(pred_ring3_norm["y"] * self.grid_size),
-                "r": int(pred_ring3_norm["r"] * self.grid_size)
-            }
-            
-            img_ring2_3 = self._draw_predictions(
-                map_name=map_name,
-                true_rings=rings,
-                pred_rings=[rings[0], pred_ring2, pred_ring3_from_pred_ring2],
-                pred_indices=[1, 2]  # Ring2和Ring3都是预测的
-            )
-            
-            if img_ring2_3 is not None:
-                output_file = ring2_3_dir / f"{json_file.stem}_pred.png"
-                cv2.imwrite(str(output_file), img_ring2_3)
-            
-            # 场景2：提供Ring1+真实Ring2，预测Ring3
-            ring2_norm = {
-                "x": rings[1]["x"] / self.grid_size,
-                "y": rings[1]["y"] / self.grid_size,
-                "r": rings[1]["r"] / self.grid_size
-            }
-            
-            # 使用predictor预测
-            _, pred_ring3_s2_norm = self.predictor.predict(map_name, ring1_norm, ring2_norm)
-            
-            # 转换回像素坐标
-            pred_ring3_from_true_ring2 = {
-                "x": int(pred_ring3_s2_norm["x"] * self.grid_size),
-                "y": int(pred_ring3_s2_norm["y"] * self.grid_size),
-                "r": int(pred_ring3_s2_norm["r"] * self.grid_size)
-            }
-            
-            img_ring3 = self._draw_predictions(
-                map_name=map_name,
-                true_rings=rings,
-                pred_rings=[rings[0], rings[1], pred_ring3_from_true_ring2],
-                pred_indices=[2]  # 只有Ring3是预测的
-            )
-            
-            if img_ring3 is not None:
-                output_file = ring3_dir / f"{json_file.stem}_pred.png"
-                cv2.imwrite(str(output_file), img_ring3)
-        
-        print(f"可视化完成！保存到: {output_path}")
-        print(f"  - ring2_3/: 场景1（预测Ring2+Ring3）")
-        print(f"  - ring3/: 场景2（预测Ring3）")
-    
-    def _draw_predictions(
-        self,
-        map_name: str,
-        true_rings: List[Dict[str, float]],
-        pred_rings: List[Dict[str, float]],
-        pred_indices: List[int] = None
-    ) -> Optional[np.ndarray]:
-        """
-        在地图上绘制真实圈和预测圈
-        
-        Args:
-            map_name: 地图名称
-            true_rings: 真实圈列表
-            pred_rings: 预测圈列表（包含真实和预测的混合）
-            pred_indices: 哪些索引是预测的（默认除了Ring1都是预测）
-            
-        Returns:
-            绘制后的图像
-        """
-        # 加载地图
-        map_file = MAP_FILES.get(map_name)
-        if not map_file:
-            print(f"  ✗ 未找到地图: {map_name}")
-            return None
-        
-        map_path = self.map_dir / map_file
-        if not map_path.exists():
-            print(f"  ✗ 地图文件不存在: {map_path}")
-            return None
-        
-        img = cv2.imread(str(map_path))
-        if img is None:
-            return None
-        
-        # 计算缩放比例
-        scale = img.shape[0] / self.grid_size
-        
-        # 绘制真实圈（白色）
-        for ring in true_rings:
-            x = int(ring["x"] * scale)
-            y = int(ring["y"] * scale)
-            r = int(ring["r"] * scale)
-            if r > 0:  # 确保半径为正
-                cv2.circle(img, (x, y), r, (255, 255, 255), 2)
-        
-        # 如果没有指定pred_indices，默认除了Ring1都是预测
-        if pred_indices is None:
-            pred_indices = list(range(1, len(pred_rings)))
-        
-        # 绘制预测圈（黄色）
-        for i in pred_indices:
-            if i >= len(pred_rings):
-                continue
-            ring = pred_rings[i]
-            x = int(ring["x"] * scale)
-            y = int(ring["y"] * scale)
-            r = int(ring["r"] * scale)
-            if r > 0:  # 确保半径为正
-                cv2.circle(img, (x, y), r, (0, 255, 255), 2)
-        
-        return img
-    
-    def visualize_custom(self, *args, **kwargs):
-        """
-        自定义可视化 - 可由子类重写
-        
-        例如：热力图、Top-K 预测等
-        """
-        raise NotImplementedError("子类需要实现自定义可视化方法")
-    
     def print_metrics(self, metrics: Dict[str, Any]) -> None:
         """
         打印评估指标
@@ -681,6 +497,3 @@ if __name__ == "__main__":
     test_loader = get_dataloader("test", batch_size=32)
     metrics = evaluator.evaluate(test_loader)
     evaluator.print_metrics(metrics)
-    
-    # 可视化
-    evaluator.visualize_predictions(output_dir="tests/temp/visualizations")

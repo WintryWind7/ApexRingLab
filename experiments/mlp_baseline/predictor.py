@@ -22,15 +22,16 @@ class BaselinePredictor(Predictor):
         "mp_rr_tropic": [0.0, 1.0]
     }
     
-    def __init__(self, model, device: str = "cuda"):
+    def __init__(self, model, device: str = "cuda", grid_size: int = 16384):
         """
         初始化Baseline预测器
         
         Args:
             model: MLPBaseline模型实例
             device: 设备
+            grid_size: 地图网格大小
         """
-        super().__init__(device)
+        super().__init__(device, grid_size)
         self.model = model.to(device)
         self.model.eval()
     
@@ -41,21 +42,26 @@ class BaselinePredictor(Predictor):
         Args:
             map_name: 地图名称（用于生成One-Hot编码）
             ring1_data: {"x": x1, "y": y1, "r": r1}
-                坐标已归一化（0-1范围）
+                原始像素坐标
             ring2_data: Ring2数据（可选）
                 - 如果为None，预测Ring2和Ring3
                 - 如果提供，直接返回Ring2，只预测Ring3
+                原始像素坐标
         
         Returns:
             (ring2_dict, ring3_dict): 两个字典，格式为 {"x": x, "y": y, "r": r}
-                坐标为归一化的绝对坐标
+                原始像素坐标
         """
         # 获取One-Hot编码
         if map_name not in self.MAP_TO_ONEHOT:
             raise ValueError(f"未知地图: {map_name}，可用地图: {list(self.MAP_TO_ONEHOT.keys())}")
         
         map_onehot = torch.tensor(self.MAP_TO_ONEHOT[map_name], dtype=torch.float32).to(self.device)
-        x1, y1, r1 = ring1_data["x"], ring1_data["y"], ring1_data["r"]
+        
+        # 归一化输入坐标
+        x1 = ring1_data["x"] / self.grid_size
+        y1 = ring1_data["y"] / self.grid_size
+        r1 = ring1_data["r"] / self.grid_size
         
         with torch.no_grad():
             if ring2_data is None:
@@ -66,30 +72,33 @@ class BaselinePredictor(Predictor):
                 input1 = torch.cat([map_onehot, ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
                 output1 = self.model(input1).cpu().numpy()[0]  # [dx2, dy2, r2]
                 
-                # 转换为绝对坐标
-                x2 = x1 + output1[0]
-                y2 = y1 + output1[1]
-                r2 = output1[2]
+                # 转换为归一化绝对坐标
+                x2_norm = x1 + output1[0]
+                y2_norm = y1 + output1[1]
+                r2_norm = output1[2]
                 
                 # 预测Ring3（相对Ring2）
                 dx2, dy2 = output1[0], output1[1]
-                ring2_rel = torch.tensor([dx2, dy2, r2], dtype=torch.float32).to(self.device)
+                ring2_rel = torch.tensor([dx2, dy2, r2_norm], dtype=torch.float32).to(self.device)
                 input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
                 output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3, r3] 相对Ring2
                 
-                # 转换为绝对坐标
-                x3 = x2 + output2[0]
-                y3 = y2 + output2[1]
-                r3 = output2[2]
+                # 转换为归一化绝对坐标
+                x3_norm = x2_norm + output2[0]
+                y3_norm = y2_norm + output2[1]
+                r3_norm = output2[2]
                 
+                # 反归一化为原始坐标
                 return (
-                    {"x": float(x2), "y": float(y2), "r": float(r2)},
-                    {"x": float(x3), "y": float(y3), "r": float(r3)}
+                    {"x": int(x2_norm * self.grid_size), "y": int(y2_norm * self.grid_size), "r": int(r2_norm * self.grid_size)},
+                    {"x": int(x3_norm * self.grid_size), "y": int(y3_norm * self.grid_size), "r": int(r3_norm * self.grid_size)}
                 )
             
             else:
                 # 场景2：给Ring1+Ring2，预测Ring3
-                x2, y2, r2 = ring2_data["x"], ring2_data["y"], ring2_data["r"]
+                x2 = ring2_data["x"] / self.grid_size
+                y2 = ring2_data["y"] / self.grid_size
+                r2 = ring2_data["r"] / self.grid_size
                 
                 # 计算Ring2相对Ring1的坐标
                 dx2 = x2 - x1
@@ -101,13 +110,13 @@ class BaselinePredictor(Predictor):
                 input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
                 output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3, r3] 相对Ring2
                 
-                # 转换为绝对坐标
-                x3 = x2 + output2[0]
-                y3 = y2 + output2[1]
-                r3 = output2[2]
+                # 转换为归一化绝对坐标
+                x3_norm = x2 + output2[0]
+                y3_norm = y2 + output2[1]
+                r3_norm = output2[2]
                 
-                # 返回输入的Ring2和预测的Ring3
+                # 反归一化为原始坐标，返回输入的Ring2和预测的Ring3
                 return (
-                    {"x": float(x2), "y": float(y2), "r": float(r2)},
-                    {"x": float(x3), "y": float(y3), "r": float(r3)}
+                    {"x": int(ring2_data["x"]), "y": int(ring2_data["y"]), "r": int(ring2_data["r"])},
+                    {"x": int(x3_norm * self.grid_size), "y": int(y3_norm * self.grid_size), "r": int(r3_norm * self.grid_size)}
                 )

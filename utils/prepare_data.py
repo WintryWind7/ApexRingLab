@@ -34,6 +34,9 @@ MAP_SUFFIXES_TO_REMOVE = [
     r"_landscape",
 ]
 
+# 排除的地图
+EXCLUDED_MAPS = ["mp_rr_desertlands_hu"]
+
 # 地图文件路径映射
 MAP_FILES = {
     "mp_rr_desertlands_hu": PROJECT_ROOT / "data" / "map" / "mp_rr_desertlands_hu.png",
@@ -421,6 +424,52 @@ def split_dataset(
     return train_data, val_data, test_data
 
 
+def nearest_neighbor_sort(data: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    使用贪心最近邻算法对数据按 Ring1 位置排序
+    
+    Args:
+        data: 原始数据
+        
+    Returns:
+        排序后的数据
+    """
+    if len(data) == 0:
+        return []
+    
+    print(f"\n正在对数据进行空间排序（最近邻遍历）...")
+    
+    sorted_data = []
+    remaining = data.copy()
+    
+    # 从第一个点开始
+    current = remaining.pop(0)
+    sorted_data.append(current)
+    
+    # 贪心选择最近的点
+    while remaining:
+        current_pos = (current["rings"][0]["x"], current["rings"][0]["y"])
+        
+        # 找到离当前点最近的点
+        nearest_idx = min(
+            range(len(remaining)),
+            key=lambda i: (
+                (remaining[i]["rings"][0]["x"] - current_pos[0])**2 + 
+                (remaining[i]["rings"][0]["y"] - current_pos[1])**2
+            )
+        )
+        
+        current = remaining.pop(nearest_idx)
+        sorted_data.append(current)
+        
+        # 每处理 100 个点打印一次进度
+        if len(sorted_data) % 100 == 0:
+            print(f"  已处理: {len(sorted_data)}/{len(data)}")
+    
+    print(f"✓ 排序完成")
+    return sorted_data
+
+
 def prepare_dataset(
     input_file: Path = INPUT_FILE,
     output_dir: Path = OUTPUT_DIR,
@@ -460,6 +509,16 @@ def prepare_dataset(
     # 标准化地图名
     data = normalize_dataset(data)
     
+    # 排除指定地图
+    original_count = len(data)
+    data = [item for item in data if item.get("map") not in EXCLUDED_MAPS]
+    excluded_count = original_count - len(data)
+    if excluded_count > 0:
+        print(f"\n排除地图:")
+        print(f"  排除: {EXCLUDED_MAPS}")
+        print(f"  移除: {excluded_count} 条")
+        print(f"  保留: {len(data)} 条")
+    
     # 分析毒圈分布
     analyze_ring_distribution(data)
     
@@ -479,15 +538,35 @@ def prepare_dataset(
     print(f"  验证集: {len(val_data)} 条")
     print(f"  测试集: {len(test_data)} 条")
     
-    # 保存数据集
+    # 保存分割后的数据集
     print(f"\n正在保存数据集到: {output_dir}")
     save_json(train_data, output_dir / "train.json")
     save_json(val_data, output_dir / "val.json")
     save_json(test_data, output_dir / "test.json")
     print(f"✓ 保存完成")
     
-    # 生成测试样本
-    generate_test_samples(test_data, output_dir)
+    # 对完整数据集按地图分组并分别进行空间排序
+    print(f"\n正在对数据按地图分组并排序...")
+    from collections import defaultdict
+    
+    map_data = defaultdict(list)
+    for item in data:
+        map_name = item.get("map", "unknown")
+        map_data[map_name].append(item)
+    
+    sorted_data = []
+    for map_name in sorted(map_data.keys()):
+        map_items = map_data[map_name]
+        print(f"\n  {map_name}: {len(map_items)} 条")
+        sorted_map_items = nearest_neighbor_sort(map_items)
+        sorted_data.extend(sorted_map_items)
+    
+    # 保存排序后的完整数据集
+    print(f"\n正在保存排序后的完整数据集...")
+    full_json_path = output_dir / "full.json"
+    save_json(sorted_data, full_json_path)
+    print(f"✓ 完整数据集已保存: {full_json_path}")
+    print(f"  总计: {len(sorted_data)} 条")
 
 
 if __name__ == "__main__":

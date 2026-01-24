@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>毒圈可视化工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Microsoft YaHei', Arial, sans-serif;
+            background: #1a1a1a;
+            color: #e0e0e0;
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            height: 100vh;
+        }
+
+        /* 左侧面板 */
+        .left-panel {
+            width: 280px;
+            background: #2a2a2a;
+            padding: 20px;
+            overflow-y: auto;
+            border-right: 1px solid #444;
+        }
+
+        .panel-section {
+            margin-bottom: 25px;
+        }
+
+        .panel-section h3 {
+            font-size: 14px;
+            color: #888;
+            margin-bottom: 10px;
+            text-transform: uppercase;
+        }
+
+        .control-group {
+            margin-bottom: 15px;
+        }
+
+        label {
+            display: block;
+            font-size: 13px;
+            margin-bottom: 5px;
+            color: #aaa;
+        }
+
+        label input[type="checkbox"] {
+            margin-right: 8px;
+            cursor: pointer;
+        }
+
+        select, button {
+            width: 100%;
+            padding: 8px;
+            background: #3a3a3a;
+            border: 1px solid #555;
+            color: #e0e0e0;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 13px;
+        }
+
+        select:hover, button:hover {
+            background: #4a4a4a;
+        }
+
+        button:active {
+            background: #2a2a2a;
+        }
+
+        button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .navigation {
+            display: flex;
+            gap: 10px;
+            align-items: center;
+        }
+
+        .navigation button {
+            flex: 1;
+        }
+
+        .navigation span {
+            font-size: 12px;
+            color: #888;
+            white-space: nowrap;
+        }
+
+        /* 中间画布 */
+        .canvas-container {
+            flex: 1;
+            position: relative;
+            background: #1a1a1a;
+            overflow: hidden;
+        }
+
+        canvas {
+            display: block;
+            cursor: grab;
+        }
+
+        canvas:active {
+            cursor: grabbing;
+        }
+
+        .canvas-info {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 12px;
+            color: #aaa;
+        }
+
+        /* 右侧面板 */
+        .right-panel {
+            width: 300px;
+            background: #2a2a2a;
+            padding: 20px;
+            overflow-y: auto;
+            border-left: 1px solid #444;
+        }
+
+        .ring-info {
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #3a3a3a;
+            border-radius: 4px;
+            border-left: 3px solid #666;
+        }
+
+        .ring-info.predicted {
+            border-left-color: #ffd700;
+        }
+
+        .ring-info h4 {
+            font-size: 13px;
+            margin-bottom: 8px;
+            color: #fff;
+        }
+
+        .ring-info.predicted h4::after {
+            content: " (预测)";
+            color: #ffd700;
+            font-size: 11px;
+        }
+
+        .ring-info p {
+            font-size: 12px;
+            color: #aaa;
+            margin: 3px 0;
+            font-family: 'Consolas', monospace;
+        }
+
+        .zoom-controls {
+            display: flex;
+            gap: 5px;
+        }
+
+        .zoom-controls button {
+            flex: 1;
+        }
+
+        .status {
+            padding: 8px;
+            background: #3a3a3a;
+            border-radius: 4px;
+            font-size: 12px;
+            text-align: center;
+            margin-top: 10px;
+        }
+
+        .status.loading {
+            color: #ffd700;
+        }
+
+        .status.error {
+            color: #ff6b6b;
+        }
+
+        .status.success {
+            color: #51cf66;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 左侧控制面板 -->
+        <div class="left-panel">
+            <div class="panel-section">
+                <h3>数据导航</h3>
+                <div class="navigation">
+                    <button id="prevBtn">← 上一个</button>
+                    <span id="indexInfo">0 / 0</span>
+                    <button id="nextBtn">下一个 →</button>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>地图选择</h3>
+                <div class="control-group">
+                    <label>当前地图</label>
+                    <select id="mapSelect">
+                        <option value="mp_rr_district">District</option>
+                        <option value="mp_rr_tropic">Tropic Island</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="panel-section">
+<h3>模型预测</h3>
+                <div class="control-group">
+                    <label>
+                        <input type="checkbox" id="predictionToggle" checked>
+                        启用自动预测
+                    </label>
+                </div>
+                <div class="control-group">
+                    <label>选择模型</label>
+                    <select id="modelSelect">
+                        <option value="">不使用模型</option>
+                    </select>
+                </div>
+                <div class="control-group">
+                    <label>预测模式</label>
+                    <select id="modeSelect">
+                        <option value="ring1_to_ring2_ring3">Ring1 → Ring2+Ring3</option>
+                        <option value="ring1_ring2_to_ring3">Ring1+Ring2 → Ring3</option>
+                    </select>
+                </div>
+            </div>
+
+            <div class="panel-section">
+                <h3>视图控制</h3>
+                <div class="control-group">
+                    <label>缩放</label>
+                    <div class="zoom-controls">
+                        <button id="zoomOutBtn">-</button>
+                        <button id="zoomResetBtn">重置</button>
+                        <button id="zoomInBtn">+</button>
+                    </div>
+                </div>
+            </div>
+
+            <div id="statusDiv" class="status" style="display: none;"></div>
+        </div>
+
+        <!-- 中间画布 -->
+        <div class="canvas-container">
+            <canvas id="mapCanvas"></canvas>
+            <div class="canvas-info">
+                <div>缩放: <span id="zoomLevel">100%</span></div>
+                <div>鼠标滚轮缩放 | 拖动平移</div>
+            </div>
+        </div>
+
+        <!-- 右侧信息面板 -->
+        <div class="right-panel">
+            <div class="panel-section">
+                <h3>毒圈信息</h3>
+                <div id="ringInfoContainer">
+                    <p style="color: #666; text-align: center; padding: 20px;">
+                        加载中...
+                    </p>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 常量定义
+        const COORD_SIZE = 16384;
+        const IMAGE_SIZE = 4096;
+        const COORD_TO_IMAGE_SCALE = IMAGE_SIZE / COORD_SIZE;
+
+        // 全局状态
+        let dataset = [];
+        let filteredDataset = []; // 当前地图过滤后的数据
+        let currentIndex = 0;
+        let currentMap = null;
+        let selectedMap = 'mp_rr_district'; // 默认选择 district
+        let mapImage = null;
+        let predictions = null;
+
+        // 画布状态
+        let canvas, ctx;
+        let zoomScale = 1.0;
+        let offsetX = 0;
+        let offsetY = 0;
+        let isDragging = false;
+        let lastMouseX = 0;
+        let lastMouseY = 0;
+
+        // 初始化
+        window.addEventListener('load', async () => {
+            canvas = document.getElementById('mapCanvas');
+            ctx = canvas.getContext('2d');
+            
+            // 设置画布大小
+            resizeCanvas();
+            window.addEventListener('resize', resizeCanvas);
+
+            // 加载数据集
+            await loadDataset();
+            
+            // 加载模型列表
+            await loadModels();
+
+            // 绑定事件
+            bindEvents();
+
+            // 显示第一条数据
+            if (dataset.length > 0) {
+                filterDataset();
+                await updateDisplay();
+            }
+        });
+
+        function resizeCanvas() {
+            const container = canvas.parentElement;
+            canvas.width = container.clientWidth;
+            canvas.height = container.clientHeight;
+            if (mapImage) {
+                drawMap();
+            }
+        }
+
+        async function loadDataset() {
+            try {
+                showStatus('加载数据集...', 'loading');
+                
+                // 加载完整数据集
+                const dataResponse = await fetch('/data/use/full.json');
+                dataset = await dataResponse.json();
+                
+                showStatus(`数据集加载完成 (${dataset.length} 条)`, 'success');
+                setTimeout(() => hideStatus(), 2000);
+            } catch (error) {
+                showStatus('数据集加载失败: ' + error.message, 'error');
+            }
+        }
+
+        async function loadModels() {
+            try {
+                const response = await fetch('/api/models/list');
+                const data = await response.json();
+                
+                const modelSelect = document.getElementById('modelSelect');
+                modelSelect.innerHTML = '<option value="">不使用模型</option>';
+                
+                data.models.forEach(model => {
+                    const option = document.createElement('option');
+                    option.value = model.id;
+                    option.textContent = model.name;
+                    modelSelect.appendChild(option);
+                });
+            } catch (error) {
+                console.error('加载模型列表失败:', error);
+            }
+        }
+
+        function bindEvents() {
+            // 导航按钮
+            document.getElementById('prevBtn').addEventListener('click', showPrevious);
+            document.getElementById('nextBtn').addEventListener('click', showNext);
+
+            // 地图选择
+            document.getElementById('mapSelect').addEventListener('change', onMapChange);
+
+            // 预测相关
+            document.getElementById('predictionToggle').addEventListener('change', onPredictionToggle);
+            document.getElementById('modelSelect').addEventListener('change', onModelChange);
+            document.getElementById('modeSelect').addEventListener('change', onModeChange);
+
+            // 缩放按钮
+            document.getElementById('zoomInBtn').addEventListener('click', () => zoom(1.2));
+            document.getElementById('zoomOutBtn').addEventListener('click', () => zoom(0.8));
+            document.getElementById('zoomResetBtn').addEventListener('click', resetView);
+
+            // 画布事件
+            canvas.addEventListener('wheel', onCanvasWheel);
+            canvas.addEventListener('mousedown', onCanvasMouseDown);
+            canvas.addEventListener('mousemove', onCanvasMouseMove);
+            canvas.addEventListener('mouseup', onCanvasMouseUp);
+            canvas.addEventListener('mouseleave', onCanvasMouseUp);
+        }
+
+        function showPrevious() {
+            if (currentIndex > 0) {
+                currentIndex--;
+                updateDisplay();
+            }
+        }
+
+        function showNext() {
+            if (currentIndex < filteredDataset.length - 1) {
+                currentIndex++;
+                updateDisplay();
+            }
+        }
+
+        function onMapChange() {
+            selectedMap = document.getElementById('mapSelect').value;
+            filterDataset();
+            currentIndex = 0;
+            updateDisplay();
+        }
+
+        function onPredictionToggle() {
+            // 切换预测开关时，重新预测
+            autoPredictIfEnabled();
+        }
+
+        function onModelChange() {
+            // 切换模型时，重新预测
+            autoPredictIfEnabled();
+        }
+
+        function onModeChange() {
+            // 切换模式时，重新预测
+            autoPredictIfEnabled();
+        }
+
+        function filterDataset() {
+            filteredDataset = dataset.filter(item => item.map === selectedMap);
+            console.log(`过滤后数据: ${filteredDataset.length} 条 (${selectedMap})`);
+        }
+
+        async function updateDisplay() {
+            if (filteredDataset.length === 0) return;
+
+            const data = filteredDataset[currentIndex];
+            predictions = null; // 清除预测结果
+
+            // 更新索引显示
+            document.getElementById('indexInfo').textContent = 
+                `${currentIndex + 1} / ${filteredDataset.length}`;
+
+            // 更新按钮状态
+            document.getElementById('prevBtn').disabled = currentIndex === 0;
+            document.getElementById('nextBtn').disabled = currentIndex === filteredDataset.length - 1;
+
+            // 加载地图（如果地图变了）
+            if (currentMap !== data.map) {
+                currentMap = data.map;
+                await loadMap(currentMap);
+            }
+
+            // 绘制
+            drawMap();
+
+            // 更新右侧信息
+            updateRingInfo(data.rings);
+
+            // 自动预测
+            await autoPredictIfEnabled();
+        }
+
+        async function autoPredictIfEnabled() {
+            const predictionEnabled = document.getElementById('predictionToggle').checked;
+            const modelId = document.getElementById('modelSelect').value;
+
+            if (!predictionEnabled || !modelId) {
+                // 预测关闭或未选择模型，清除预测结果
+                predictions = null;
+                drawMap();
+                if (filteredDataset.length > 0) {
+                    updateRingInfo(filteredDataset[currentIndex].rings);
+                }
+                return;
+            }
+
+            // 执行预测
+            await executePrediction();
+        }
+
+        async function loadMap(mapName) {
+            return new Promise((resolve, reject) => {
+                const img = new Image();
+                img.onload = () => {
+                    mapImage = img;
+                    resetView();
+                    resolve();
+                };
+                img.onerror = reject;
+                img.src = `/api/maps/${mapName}`;
+            });
+        }
+
+        function resetView() {
+            if (!mapImage) return;
+            
+            // 计算适应画布的缩放比例
+            const scaleX = canvas.width / mapImage.width;
+            const scaleY = canvas.height / mapImage.height;
+            zoomScale = Math.min(scaleX, scaleY) * 0.9;
+
+            // 居中
+            offsetX = (canvas.width - mapImage.width * zoomScale) / 2;
+            offsetY = (canvas.height - mapImage.height * zoomScale) / 2;
+
+            updateZoomDisplay();
+            drawMap();
+        }
+
+        function zoom(factor) {
+            const centerX = canvas.width / 2;
+            const centerY = canvas.height / 2;
+
+            // 计算缩放前的世界坐标
+            const worldX = (centerX - offsetX) / zoomScale;
+            const worldY = (centerY - offsetY) / zoomScale;
+
+            // 应用缩放
+            zoomScale *= factor;
+            zoomScale = Math.max(0.1, Math.min(zoomScale, 10));
+
+            // 调整偏移以保持中心点不变
+            offsetX = centerX - worldX * zoomScale;
+            offsetY = centerY - worldY * zoomScale;
+
+            updateZoomDisplay();
+            drawMap();
+        }
+
+        function updateZoomDisplay() {
+            document.getElementById('zoomLevel').textContent = 
+                Math.round(zoomScale * 100) + '%';
+        }
+
+        function onCanvasWheel(e) {
+            e.preventDefault();
+            const factor = e.deltaY < 0 ? 1.1 : 0.9;
+            
+            // 以鼠标位置为中心缩放
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            const worldX = (mouseX - offsetX) / zoomScale;
+            const worldY = (mouseY - offsetY) / zoomScale;
+
+            zoomScale *= factor;
+            zoomScale = Math.max(0.1, Math.min(zoomScale, 10));
+
+            offsetX = mouseX - worldX * zoomScale;
+            offsetY = mouseY - worldY * zoomScale;
+
+            updateZoomDisplay();
+            drawMap();
+        }
+
+        function onCanvasMouseDown(e) {
+            isDragging = true;
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+        }
+
+        function onCanvasMouseMove(e) {
+            if (!isDragging) return;
+
+            const dx = e.clientX - lastMouseX;
+            const dy = e.clientY - lastMouseY;
+
+            offsetX += dx;
+            offsetY += dy;
+
+            lastMouseX = e.clientX;
+            lastMouseY = e.clientY;
+
+            drawMap();
+        }
+
+        function onCanvasMouseUp() {
+            isDragging = false;
+        }
+
+        function drawMap() {
+            if (!mapImage) return;
+
+            // 清空画布
+            ctx.fillStyle = '#1a1a1a';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 绘制地图
+            ctx.drawImage(
+                mapImage,
+                offsetX,
+                offsetY,
+                mapImage.width * zoomScale,
+                mapImage.height * zoomScale
+            );
+
+            // 绘制白圈（真实数据）
+            const data = filteredDataset[currentIndex];
+            if (data && data.rings) {
+                data.rings.forEach((ring, index) => {
+                    // Ring1 显示圆心，Ring2 和 Ring3 不显示圆心
+                    const showCenter = (index === 0);
+                    drawRing(ring, '#ffffff', 2, showCenter);
+                });
+            }
+
+            // 绘制黄圈（预测结果）
+            if (predictions) {
+                if (predictions.ring2) {
+                    drawRing(predictions.ring2, '#ffd700', 3, false);
+                }
+                if (predictions.ring3) {
+                    drawRing(predictions.ring3, '#ffd700', 3, false);
+                }
+            }
+        }
+
+        function drawRing(ring, color, lineWidth, showCenter = true) {
+            // 游戏坐标 → 图片坐标 → 画布坐标
+            const imageX = ring.x * COORD_TO_IMAGE_SCALE;
+            const imageY = ring.y * COORD_TO_IMAGE_SCALE;
+            const imageR = ring.r * COORD_TO_IMAGE_SCALE;
+
+            const canvasX = offsetX + imageX * zoomScale;
+            const canvasY = offsetY + imageY * zoomScale;
+            const canvasR = imageR * zoomScale;
+
+            // 绘制圆圈
+            ctx.strokeStyle = color;
+            ctx.lineWidth = lineWidth;
+            ctx.beginPath();
+            ctx.arc(canvasX, canvasY, canvasR, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // 绘制中心点（可选）
+            if (showCenter) {
+                ctx.fillStyle = color;
+                ctx.beginPath();
+                ctx.arc(canvasX, canvasY, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        function updateRingInfo(rings) {
+            const container = document.getElementById('ringInfoContainer');
+            container.innerHTML = '';
+
+            rings.forEach((ring, index) => {
+                const div = document.createElement('div');
+                div.className = 'ring-info';
+                div.innerHTML = `
+                    <h4>Ring ${index + 1}</h4>
+                    <p>x: ${ring.x}</p>
+                    <p>y: ${ring.y}</p>
+                    <p>r: ${ring.r}</p>
+                `;
+                container.appendChild(div);
+            });
+
+            // 添加预测结果
+            if (predictions) {
+                if (predictions.ring2) {
+                    const div = document.createElement('div');
+                    div.className = 'ring-info predicted';
+                    div.innerHTML = `
+                        <h4>Ring 2</h4>
+                        <p>x: ${Math.round(predictions.ring2.x)}</p>
+                        <p>y: ${Math.round(predictions.ring2.y)}</p>
+                        <p>r: ${Math.round(predictions.ring2.r)}</p>
+                    `;
+                    container.appendChild(div);
+                }
+                if (predictions.ring3) {
+                    const div = document.createElement('div');
+                    div.className = 'ring-info predicted';
+                    div.innerHTML = `
+                        <h4>Ring 3</h4>
+                        <p>x: ${Math.round(predictions.ring3.x)}</p>
+                        <p>y: ${Math.round(predictions.ring3.y)}</p>
+                        <p>r: ${Math.round(predictions.ring3.r)}</p>
+                    `;
+                    container.appendChild(div);
+                }
+            }
+        }
+
+        async function executePrediction() {
+            const modelId = document.getElementById('modelSelect').value;
+            if (!modelId) {
+                return;
+            }
+
+            const data = filteredDataset[currentIndex];
+            const mode = document.getElementById('modeSelect').value;
+
+            try {
+                const requestBody = {
+                    model: modelId,
+                    map: data.map,
+                    ring1: data.rings[0],
+                    mode: mode
+                };
+
+                if (mode === 'ring1_ring2_to_ring3' && data.rings.length >= 2) {
+                    requestBody.ring2 = data.rings[1];
+                }
+
+                const response = await fetch('/api/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestBody)
+                });
+
+                if (!response.ok) {
+                    throw new Error('预测失败');
+                }
+
+                predictions = await response.json();
+
+                // 重新绘制
+                drawMap();
+                updateRingInfo(data.rings);
+
+            } catch (error) {
+                console.error('预测失败:', error);
+                predictions = null;
+                drawMap();
+                updateRingInfo(data.rings);
+            }
+        }
+
+        function showStatus(message, type) {
+            const statusDiv = document.getElementById('statusDiv');
+            statusDiv.textContent = message;
+            statusDiv.className = 'status ' + type;
+            statusDiv.style.display = 'block';
+        }
+
+        function hideStatus() {
+            document.getElementById('statusDiv').style.display = 'none';
+        }
+    </script>
+</body>
+</html>

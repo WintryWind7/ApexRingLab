@@ -1,0 +1,20 @@
+{
+  "models": {
+    "gan": {
+      "enabled": true,
+      "name": "Gan"
+    },
+    "mlp_baseline": {
+      "enabled": true,
+      "name": "Mlp Baseline"
+    },
+    "mlp_deep": {
+      "enabled": true,
+      "name": "Mlp Deep"
+    },
+    "mlp_direction": {
+      "enabled": true,
+      "name": "Mlp Direction"
+    }
+  }
+}
