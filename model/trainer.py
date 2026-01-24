@@ -48,10 +48,7 @@ class Trainer:
         save_dir: str = "checkpoints",
         early_stopping_patience: int = 10,
         verbose: bool = True,
-        coordinate_mode: str = "relative",
         map_filter: Optional[str] = None,
-        use_onehot: bool = False,
-        extra_feature_dims: int = 0,
         compute_scenario_errors: bool = False,
         predictor_class: Optional[type] = None,
         test_loader: Optional[DataLoader] = None,
@@ -71,10 +68,7 @@ class Trainer:
             save_dir: 检查点保存目录
             early_stopping_patience: 早停耐心值
             verbose: 是否打印详细信息
-            coordinate_mode: 坐标模式 ('absolute' 或 'relative')
             map_filter: 地图过滤器（用于分地图模型验证）
-            use_onehot: 是否使用One-Hot地图编码
-            extra_feature_dims: 额外特征维度（如距离特征）
             compute_scenario_errors: 是否计算场景误差（会显著降低训练速度，默认False）
             predictor_class: Predictor类（用于训练后自动评估）
             test_loader: 测试数据加载器（用于训练后自动评估）
@@ -92,10 +86,7 @@ class Trainer:
         self.save_dir.mkdir(parents=True, exist_ok=True)
         self.early_stopping_patience = early_stopping_patience
         self.verbose = verbose
-        self.coordinate_mode = coordinate_mode
         self.map_filter = map_filter
-        self.use_onehot = use_onehot
-        self.extra_feature_dims = extra_feature_dims
         self.compute_scenario_errors = compute_scenario_errors
         self.predictor_class = predictor_class
         self.test_loader = test_loader
@@ -201,6 +192,12 @@ class Trainer:
             "mp_rr_tropic": [0.0, 1.0]
         }
         
+        # 固定半径
+        MAP_RADII = {
+            "mp_rr_district": {"ring1": 4930, "ring2": 2419, "ring3": 1488},
+            "mp_rr_tropic": {"ring1": 4894, "ring2": 2407, "ring3": 1284}
+        }
+        
         # 读取验证集原始数据
         data_dir = Path(__file__).parent.parent / "data" / "use"
         val_data_path = data_dir / "val.json"
@@ -224,130 +221,82 @@ class Trainer:
                 if self.map_filter and map_name != self.map_filter:
                     continue
                 
+                # 跳过未知地图
+                if map_name not in MAP_TO_ONEHOT or map_name not in MAP_RADII:
+                    continue
+                
                 rings = item.get("rings", [])
                 if len(rings) < 3:
                     continue
                 
+                # 提取坐标
+                x1, y1 = rings[0]["x"], rings[0]["y"]
+                x2, y2 = rings[1]["x"], rings[1]["y"]
+                x3, y3 = rings[2]["x"], rings[2]["y"]
+                
+                # 获取固定半径
+                radii = MAP_RADII[map_name]
+                r1 = radii["ring1"]
+                r2 = radii["ring2"]
+                r3 = radii["ring3"]
+                
                 # 归一化
-                x1, y1, r1 = rings[0]["x"] / grid_size, rings[0]["y"] / grid_size, rings[0]["r"] / grid_size
-                x2, y2, r2 = rings[1]["x"] / grid_size, rings[1]["y"] / grid_size, rings[1]["r"] / grid_size
-                x3, y3, r3 = rings[2]["x"] / grid_size, rings[2]["y"] / grid_size, rings[2]["r"] / grid_size
+                x1, y1, r1 = x1 / grid_size, y1 / grid_size, r1 / grid_size
+                x2, y2, r2 = x2 / grid_size, y2 / grid_size, r2 / grid_size
+                x3, y3, r3 = x3 / grid_size, y3 / grid_size, r3 / grid_size
                 
-                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
-                x3, y3, r3 = rings[2]["x"] / grid_size, rings[2]["y"] / grid_size, rings[2]["r"] / grid_size
+                # One-Hot编码
+                map_onehot = torch.tensor(MAP_TO_ONEHOT[map_name], dtype=torch.float32).to(self.device)
                 
-                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
+                # 场景1：只给Ring1，预测Ring2再预测Ring3
+                # 输入: [map(2), x1, y1, r1, r2, r3, 0, 0]
+                input1 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, 0.0, 0.0], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
                 
-                # One-Hot编码（如果需要）
-                if self.use_onehot:
-                    if map_name in MAP_TO_ONEHOT:
-                        map_onehot = torch.tensor(MAP_TO_ONEHOT[map_name], dtype=torch.float32).to(self.device)
-                    else:
-                        # 未知地图，跳过
-                        continue
+                # 预测Ring2（相对坐标）
+                ring2_pred_rel = self.model(input1).squeeze(0)  # [dx2, dy2]
                 
-                if self.coordinate_mode == "absolute":
-                    # 绝对坐标模式
-                    ring2_true = torch.tensor([x2, y2, r2], dtype=torch.float32).to(self.device)
-                    ring3_true = torch.tensor([x3, y3, r3], dtype=torch.float32)
-                    
-                    # 场景1：只给Ring1，预测Ring2再预测Ring3
-                    if self.use_onehot:
-                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device), map_onehot]).unsqueeze(0)
-                    else:
-                        input1 = torch.cat([ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
-                    
-                    ring2_pred = self.model(input1).squeeze(0)
-                    
-                    if self.use_onehot:
-                        input2 = torch.cat([ring1, ring2_pred, map_onehot]).unsqueeze(0)
-                    else:
-                        input2 = torch.cat([ring1, ring2_pred]).unsqueeze(0)
-                    
-                    ring3_pred_s1 = self.model(input2).squeeze(0).cpu()
-                    
-                    # 计算场景1的Ring3误差
-                    center_error_s1 = torch.sqrt(((ring3_pred_s1[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
-                    scenario1_errors.append(center_error_s1)
-                    
-                    # 场景2：给Ring1+Ring2，预测Ring3
-                    if self.use_onehot:
-                        input3 = torch.cat([ring1, ring2_true, map_onehot]).unsqueeze(0)
-                    else:
-                        input3 = torch.cat([ring1, ring2_true]).unsqueeze(0)
-                    
-                    ring3_pred_s2 = self.model(input3).squeeze(0).cpu()
-                    
-                    # 计算场景2的Ring3误差
-                    center_error_s2 = torch.sqrt(((ring3_pred_s2[:2] - ring3_true[:2]) ** 2).sum()).item() * grid_size
-                    scenario2_errors.append(center_error_s2)
+                # 转换为绝对坐标
+                x2_pred = x1 + ring2_pred_rel[0].item()
+                y2_pred = y1 + ring2_pred_rel[1].item()
                 
-                elif self.coordinate_mode == "relative":
-                    # 相对坐标模式
-                    # 场景1：只给Ring1，预测Ring2（相对坐标）再预测Ring3（相对坐标）
-                    if self.use_onehot:
-                        input1 = torch.cat([map_onehot, ring1, torch.zeros(3 + self.extra_feature_dims).to(self.device)]).unsqueeze(0)
-                    else:
-                        input1 = torch.cat([ring1, torch.zeros(3 + self.extra_feature_dims).to(self.device)]).unsqueeze(0)
-                    
-                    ring2_pred_rel = self.model(input1).squeeze(0)  # [dx2, dy2, r2]
-                    
-                    # 转换为绝对坐标（保持在GPU上用于下一步预测）
-                    ring2_pred_abs_x = ring1[0].item() + ring2_pred_rel[0].item()
-                    ring2_pred_abs_y = ring1[1].item() + ring2_pred_rel[1].item()
-                    
-                    # 预测Ring3（相对Ring2）
-                    if self.use_onehot:
-                        # 如果有额外特征，用0填充
-                        if self.extra_feature_dims > 0:
-                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
-                            input2 = torch.cat([map_onehot, ring1, ring2_pred_rel, extra_features]).unsqueeze(0)
-                        else:
-                            input2 = torch.cat([map_onehot, ring1, ring2_pred_rel]).unsqueeze(0)
-                    else:
-                        if self.extra_feature_dims > 0:
-                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
-                            input2 = torch.cat([ring1, ring2_pred_rel, extra_features]).unsqueeze(0)
-                        else:
-                            input2 = torch.cat([ring1, ring2_pred_rel]).unsqueeze(0)
-                    
-                    ring3_pred_rel = self.model(input2).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
-                    
-                    # 转换为绝对坐标
-                    ring3_pred_abs_x = ring2_pred_abs_x + ring3_pred_rel[0].item()
-                    ring3_pred_abs_y = ring2_pred_abs_y + ring3_pred_rel[1].item()
-                    
-                    # 计算场景1的Ring3误差
-                    center_error_s1 = ((ring3_pred_abs_x - x3) ** 2 + (ring3_pred_abs_y - y3) ** 2) ** 0.5 * grid_size
-                    scenario1_errors.append(center_error_s1)
-                    
-                    # 场景2：给Ring1+Ring2（真实），预测Ring3
-                    dx2_true, dy2_true = x2 - x1, y2 - y1
-                    ring2_true_rel = torch.tensor([dx2_true, dy2_true, r2], dtype=torch.float32).to(self.device)
-                    
-                    if self.use_onehot:
-                        # 如果有额外特征，用0填充
-                        if self.extra_feature_dims > 0:
-                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
-                            input3 = torch.cat([map_onehot, ring1, ring2_true_rel, extra_features]).unsqueeze(0)
-                        else:
-                            input3 = torch.cat([map_onehot, ring1, ring2_true_rel]).unsqueeze(0)
-                    else:
-                        if self.extra_feature_dims > 0:
-                            extra_features = torch.zeros(self.extra_feature_dims).to(self.device)
-                            input3 = torch.cat([ring1, ring2_true_rel, extra_features]).unsqueeze(0)
-                        else:
-                            input3 = torch.cat([ring1, ring2_true_rel]).unsqueeze(0)
-                    
-                    ring3_pred_rel_s2 = self.model(input3).squeeze(0)  # [dx3, dy3, r3] 相对Ring2
-                    
-                    # 转换为绝对坐标
-                    ring3_pred_abs_x_s2 = x2 + ring3_pred_rel_s2[0].item()
-                    ring3_pred_abs_y_s2 = y2 + ring3_pred_rel_s2[1].item()
-                    
-                    # 计算场景2的Ring3误差
-                    center_error_s2 = ((ring3_pred_abs_x_s2 - x3) ** 2 + (ring3_pred_abs_y_s2 - y3) ** 2) ** 0.5 * grid_size
-                    scenario2_errors.append(center_error_s2)
+                # 预测Ring3（相对Ring2）
+                dx2_pred = ring2_pred_rel[0].item()
+                dy2_pred = ring2_pred_rel[1].item()
+                input2 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, dx2_pred, dy2_pred], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                
+                ring3_pred_rel = self.model(input2).squeeze(0)  # [dx3, dy3]
+                
+                # 转换为绝对坐标
+                x3_pred_s1 = x2_pred + ring3_pred_rel[0].item()
+                y3_pred_s1 = y2_pred + ring3_pred_rel[1].item()
+                
+                # 计算场景1的Ring3误差
+                center_error_s1 = ((x3_pred_s1 - x3) ** 2 + (y3_pred_s1 - y3) ** 2) ** 0.5 * grid_size
+                scenario1_errors.append(center_error_s1)
+                
+                # 场景2：给Ring1+Ring2（真实），预测Ring3
+                dx2_true = x2 - x1
+                dy2_true = y2 - y1
+                input3 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, dx2_true, dy2_true], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                
+                ring3_pred_rel_s2 = self.model(input3).squeeze(0)  # [dx3, dy3]
+                
+                # 转换为绝对坐标
+                x3_pred_s2 = x2 + ring3_pred_rel_s2[0].item()
+                y3_pred_s2 = y2 + ring3_pred_rel_s2[1].item()
+                
+                # 计算场景2的Ring3误差
+                center_error_s2 = ((x3_pred_s2 - x3) ** 2 + (y3_pred_s2 - y3) ** 2) ** 0.5 * grid_size
+                scenario2_errors.append(center_error_s2)
         
         avg_s1 = sum(scenario1_errors) / len(scenario1_errors) if scenario1_errors else 0
         avg_s2 = sum(scenario2_errors) / len(scenario2_errors) if scenario2_errors else 0

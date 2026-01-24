@@ -11,7 +11,6 @@ from predictor import DeepMLPPredictor
 from model.dataset import get_dataloader
 from model.loss import get_loss_fn
 from model.trainer import Trainer
-from model.evaluator import Evaluator
 
 
 def train_deep_mlp(depth: str = "deep"):
@@ -23,10 +22,10 @@ def train_deep_mlp(depth: str = "deep"):
     """
     if depth == "deep":
         model = MLPDeep()
-        desc = "8 → 256 → 128 → 64 → 32 → 3"
+        desc = "9 → 256 → 128 → 64 → 32 → 2"
     elif depth == "very_deep":
         model = MLPVeryDeep()
-        desc = "8 → 512 → 256 → 256 → 128 → 128 → 64 → 32 → 3"
+        desc = "9 → 512 → 256 → 256 → 128 → 128 → 64 → 32 → 2"
     else:
         raise ValueError(f"Unknown depth: {depth}")
     
@@ -34,9 +33,9 @@ def train_deep_mlp(depth: str = "deep"):
     save_dir = Path(__file__).parent / "checkpoints"
     
     print(f"\n{'='*70}")
-    print(f"深层MLP实验 - {depth.upper()} - CircleLoss")
+    print(f"深层MLP实验 - {depth.upper()}")
     print(f"结构: {desc}")
-    print(f"损失: CircleLoss (alpha=2.0, beta=1.0)")
+    print(f"损失: MSE")
     print(f"{'='*70}\n")
     
     # 数据
@@ -47,8 +46,8 @@ def train_deep_mlp(depth: str = "deep"):
     # 模型
     model.summary()
     
-    # 训练（使用CircleLoss，自动评估）
-    loss_fn = get_loss_fn("circle", alpha=2.0, beta=1.0)
+    # 训练（使用MSE）
+    loss_fn = get_loss_fn("mse")
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=10)
     
@@ -62,8 +61,6 @@ def train_deep_mlp(depth: str = "deep"):
         save_dir=str(save_dir),
         early_stopping_patience=20,
         verbose=True,
-        coordinate_mode="relative",
-        use_onehot=True,
         predictor_class=DeepMLPPredictor,  # 自动评估
         test_loader=test_loader,
         auto_evaluate=True
@@ -71,16 +68,9 @@ def train_deep_mlp(depth: str = "deep"):
     
     trainer.train(num_epochs=200)
     
-    # 可视化
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    predictor = DeepMLPPredictor(model, device)
-    evaluator = Evaluator(predictor=predictor, device=device)
-    vis_dir = Path(__file__).parent / "visualizations" / depth
-    evaluator.visualize_predictions(output_dir=str(vis_dir))
-    
     print(f"\n{depth.upper()}实验完成！")
-    print(f"  模型: {save_dir / 'best_model.pth'}")
-    print(f"  可视化: {vis_dir}")
+    print(f"  模型: {save_dir / model.model_name / 'best_model.pth'}")
+    print(f"  可视化: 启动 Web 服务器查看 (python utils/ring_viewer_server.py)")
 
 
 if __name__ == "__main__":

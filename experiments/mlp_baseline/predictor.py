@@ -14,6 +14,7 @@ class BaselinePredictor(Predictor):
     Baseline模型的预测器
     
     使用One-Hot编码区分地图的单一模型
+    模型输出: [dx, dy] (2维，不预测半径)
     """
     
     # 地图到One-Hot的映射
@@ -50,7 +51,7 @@ class BaselinePredictor(Predictor):
         
         Returns:
             (ring2_dict, ring3_dict): 两个字典，格式为 {"x": x, "y": y, "r": r}
-                原始像素坐标
+                原始像素坐标，半径使用固定值
         """
         # 获取One-Hot编码
         if map_name not in self.MAP_TO_ONEHOT:
@@ -63,60 +64,80 @@ class BaselinePredictor(Predictor):
         y1 = ring1_data["y"] / self.grid_size
         r1 = ring1_data["r"] / self.grid_size
         
+        # 获取固定半径（归一化）
+        r2 = self.get_fixed_radius(map_name, 2) / self.grid_size
+        r3 = self.get_fixed_radius(map_name, 3) / self.grid_size
+        
         with torch.no_grad():
             if ring2_data is None:
                 # 场景1：只给Ring1，预测Ring2和Ring3
                 
                 # 预测Ring2（相对坐标）
-                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
-                input1 = torch.cat([map_onehot, ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
-                output1 = self.model(input1).cpu().numpy()[0]  # [dx2, dy2, r2]
+                # 输入: [map(2), x1, y1, r1, r2, r3, 0, 0]
+                input1 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, 0.0, 0.0], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                output1 = self.model(input1).cpu().numpy()[0]  # [dx2, dy2]
                 
                 # 转换为归一化绝对坐标
                 x2_norm = x1 + output1[0]
                 y2_norm = y1 + output1[1]
-                r2_norm = output1[2]
                 
                 # 预测Ring3（相对Ring2）
+                # 输入: [map(2), x1, y1, r1, r2, r3, dx2, dy2]
                 dx2, dy2 = output1[0], output1[1]
-                ring2_rel = torch.tensor([dx2, dy2, r2_norm], dtype=torch.float32).to(self.device)
-                input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
-                output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3, r3] 相对Ring2
+                input2 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, dx2, dy2], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3]
                 
                 # 转换为归一化绝对坐标
                 x3_norm = x2_norm + output2[0]
                 y3_norm = y2_norm + output2[1]
-                r3_norm = output2[2]
                 
                 # 反归一化为原始坐标
                 return (
-                    {"x": int(x2_norm * self.grid_size), "y": int(y2_norm * self.grid_size), "r": int(r2_norm * self.grid_size)},
-                    {"x": int(x3_norm * self.grid_size), "y": int(y3_norm * self.grid_size), "r": int(r3_norm * self.grid_size)}
+                    {
+                        "x": int(x2_norm * self.grid_size), 
+                        "y": int(y2_norm * self.grid_size), 
+                        "r": int(self.get_fixed_radius(map_name, 2))
+                    },
+                    {
+                        "x": int(x3_norm * self.grid_size), 
+                        "y": int(y3_norm * self.grid_size), 
+                        "r": int(self.get_fixed_radius(map_name, 3))
+                    }
                 )
             
             else:
                 # 场景2：给Ring1+Ring2，预测Ring3
                 x2 = ring2_data["x"] / self.grid_size
                 y2 = ring2_data["y"] / self.grid_size
-                r2 = ring2_data["r"] / self.grid_size
                 
                 # 计算Ring2相对Ring1的坐标
                 dx2 = x2 - x1
                 dy2 = y2 - y1
                 
                 # 预测Ring3（相对Ring2）
-                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
-                ring2_rel = torch.tensor([dx2, dy2, r2], dtype=torch.float32).to(self.device)
-                input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
-                output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3, r3] 相对Ring2
+                # 输入: [map(2), x1, y1, r1, r2, r3, dx2, dy2]
+                input2 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, dx2, dy2], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3]
                 
                 # 转换为归一化绝对坐标
                 x3_norm = x2 + output2[0]
                 y3_norm = y2 + output2[1]
-                r3_norm = output2[2]
                 
                 # 反归一化为原始坐标，返回输入的Ring2和预测的Ring3
                 return (
                     {"x": int(ring2_data["x"]), "y": int(ring2_data["y"]), "r": int(ring2_data["r"])},
-                    {"x": int(x3_norm * self.grid_size), "y": int(y3_norm * self.grid_size), "r": int(r3_norm * self.grid_size)}
+                    {
+                        "x": int(x3_norm * self.grid_size), 
+                        "y": int(y3_norm * self.grid_size), 
+                        "r": int(self.get_fixed_radius(map_name, 3))
+                    }
                 )

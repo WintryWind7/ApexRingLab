@@ -21,6 +21,12 @@ MAP_TO_ONEHOT = {
     "mp_rr_district": [1.0, 0.0],
     "mp_rr_tropic": [0.0, 1.0]
 }
+
+# 固定半径
+MAP_RADII = {
+    "mp_rr_district": {"ring1": 4930, "ring2": 2419, "ring3": 1488},
+    "mp_rr_tropic": {"ring1": 4894, "ring2": 2407, "ring3": 1284}
+}
 # ==================================================
 
 
@@ -30,12 +36,11 @@ class RingDataset(Dataset):
     
     每条原始数据包含 3 个圈 [ring1, ring2, ring3]
     生成 2 个训练样本：
-    - 样本 1: input=ring1 (3,) → target=ring2 (3,)
-    - 样本 2: input=ring1+ring2 (6,) → target=ring3 (3,)
+    - 样本 1: input=ring1 (9,) → target=ring2 (2,)
+    - 样本 2: input=ring1+ring2 (9,) → target=ring3 (2,)
     
-    支持两种坐标模式：
-    - 'absolute': 全绝对坐标（原始方案）
-    - 'relative': Ring1绝对 + Ring2相对Ring1 + Ring3相对Ring2（默认）
+    输入: [map_onehot(2), x1, y1, r1, r2, r3, dx_prev, dy_prev] = 9维
+    输出: [dx, dy] = 2维（不预测半径，使用固定值）
     """
     
     def __init__(
@@ -43,7 +48,6 @@ class RingDataset(Dataset):
         split: Literal["train", "val", "test"] = "train",
         data_dir: Path = DATA_DIR,
         normalize: bool = True,
-        coordinate_mode: Literal["absolute", "relative"] = "relative",
         use_map_encoding: bool = True
     ):
         """
@@ -53,13 +57,11 @@ class RingDataset(Dataset):
             split: 数据集分割 (train/val/test)
             data_dir: 数据目录（Path对象）
             normalize: 是否归一化坐标
-            coordinate_mode: 坐标模式 ('absolute' 或 'relative')
             use_map_encoding: 是否使用One-Hot地图编码（默认True）
         """
         self.split = split
         self.normalize = normalize
         self.grid_size = GRID_SIZE
-        self.coordinate_mode = coordinate_mode
         self.use_map_encoding = use_map_encoding
         
         # 加载数据
@@ -71,7 +73,7 @@ class RingDataset(Dataset):
         self.samples = self._generate_samples()
         
         map_info = "with map encoding" if use_map_encoding else "without map encoding"
-        print(f"加载 {split} 数据集 ({coordinate_mode}, {map_info}): {len(self.raw_data)} 条原始数据 → {len(self.samples)} 个训练样本")
+        print(f"加载 {split} 数据集 ({map_info}): {len(self.raw_data)} 条原始数据 → {len(self.samples)} 个训练样本")
     
     def _generate_samples(self) -> List[Tuple[List[float], List[float]]]:
         """
@@ -96,15 +98,23 @@ class RingDataset(Dataset):
             else:
                 map_onehot = []
             
+            # 获取固定半径
+            if map_name not in MAP_RADII:
+                continue
+            radii = MAP_RADII[map_name]
+            r1 = radii["ring1"]
+            r2 = radii["ring2"]
+            r3 = radii["ring3"]
+            
             rings = item.get("rings", [])
             
             if len(rings) < 3:
                 continue
             
             # 提取坐标
-            x1, y1, r1 = rings[0]["x"], rings[0]["y"], rings[0]["r"]
-            x2, y2, r2 = rings[1]["x"], rings[1]["y"], rings[1]["r"]
-            x3, y3, r3 = rings[2]["x"], rings[2]["y"], rings[2]["r"]
+            x1, y1 = rings[0]["x"], rings[0]["y"]
+            x2, y2 = rings[1]["x"], rings[1]["y"]
+            x3, y3 = rings[2]["x"], rings[2]["y"]
             
             # 归一化
             if self.normalize:
@@ -112,39 +122,23 @@ class RingDataset(Dataset):
                 x2, y2, r2 = x2 / self.grid_size, y2 / self.grid_size, r2 / self.grid_size
                 x3, y3, r3 = x3 / self.grid_size, y3 / self.grid_size, r3 / self.grid_size
             
-            if self.coordinate_mode == "absolute":
-                # 绝对坐标模式（原始方案）
-                ring1 = [x1, y1, r1]
-                ring2 = [x2, y2, r2]
-                ring3 = [x3, y3, r3]
-                
-                # 样本 1: ring1 + map → ring2
-                samples.append((map_onehot + ring1, ring2))
-                
-                # 样本 2: ring1+ring2 + map → ring3
-                samples.append((map_onehot + ring1 + ring2, ring3))
+            # 计算相对坐标
+            dx2, dy2 = x2 - x1, y2 - y1
+            dx3, dy3 = x3 - x2, y3 - y2
             
-            elif self.coordinate_mode == "relative":
-                # 相对坐标模式
-                # Ring1绝对，Ring2相对Ring1，Ring3相对Ring2
-                
-                # 计算相对坐标
-                dx2, dy2 = x2 - x1, y2 - y1  # Ring2相对Ring1
-                dx3, dy3 = x3 - x2, y3 - y2  # Ring3相对Ring2
-                
-                # 样本 1: ring1 + map → ring2 (相对坐标)
-                # 输入: map_onehot + [x1, y1, r1, 0, 0, 0]
-                # 输出: [dx2, dy2, r2]
-                input1 = map_onehot + [x1, y1, r1, 0, 0, 0]
-                target1 = [dx2, dy2, r2]
-                samples.append((input1, target1))
-                
-                # 样本 2: ring1 + ring2 + map → ring3 (相对坐标)
-                # 输入: map_onehot + [x1, y1, r1, dx2, dy2, r2]
-                # 输出: [dx3, dy3, r3]
-                input2 = map_onehot + [x1, y1, r1, dx2, dy2, r2]
-                target2 = [dx3, dy3, r3]
-                samples.append((input2, target2))
+            # 样本1: Ring1 → Ring2
+            # 输入: [map(2), x1, y1, r1, r2, r3, 0, 0]
+            # 输出: [dx2, dy2]
+            input1 = map_onehot + [x1, y1, r1, r2, r3, 0.0, 0.0]
+            target1 = [dx2, dy2]
+            samples.append((input1, target1))
+            
+            # 样本2: Ring1 + Ring2 → Ring3
+            # 输入: [map(2), x1, y1, r1, r2, r3, dx2, dy2]
+            # 输出: [dx3, dy3]
+            input2 = map_onehot + [x1, y1, r1, r2, r3, dx2, dy2]
+            target2 = [dx3, dy3]
+            samples.append((input2, target2))
         
         return samples
     
@@ -166,47 +160,11 @@ class RingDataset(Dataset):
         return input_tensor, target_tensor
 
 
-def collate_fn(batch):
-    """
-    自定义 collate 函数，处理不同长度的输入
-    
-    Args:
-        batch: [(input, target), ...] 列表
-        
-    Returns:
-        (inputs, targets) - 批次张量
-    """
-    inputs, targets = zip(*batch)
-    
-    # 检查输入长度
-    input_lengths = set(len(x) for x in inputs)
-    
-    if len(input_lengths) > 1:
-        # 混合长度，需要padding到最大长度
-        max_len = max(input_lengths)
-        padded_inputs = []
-        for x in inputs:
-            if len(x) < max_len:
-                # padding到max_len
-                padded = torch.cat([x, torch.zeros(max_len - len(x))])
-            else:
-                padded = x
-            padded_inputs.append(padded)
-        inputs = torch.stack(padded_inputs)
-    else:
-        inputs = torch.stack(list(inputs))
-    
-    targets = torch.stack(list(targets))
-    
-    return inputs, targets
-
-
 def get_dataloader(
     split: Literal["train", "val", "test"] = "train",
     batch_size: int = 32,
     shuffle: bool = None,
     num_workers: int = 0,
-    coordinate_mode: Literal["absolute", "relative"] = "relative",
     use_map_encoding: bool = True,
     **kwargs
 ) -> DataLoader:
@@ -218,7 +176,6 @@ def get_dataloader(
         batch_size: 批次大小
         shuffle: 是否打乱，默认 train=True, val/test=False
         num_workers: 数据加载线程数
-        coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         use_map_encoding: 是否使用One-Hot地图编码（默认True）
         **kwargs: 其他 DataLoader 参数
         
@@ -230,8 +187,7 @@ def get_dataloader(
         shuffle = (split == "train")
     
     dataset = RingDataset(
-        split=split, 
-        coordinate_mode=coordinate_mode,
+        split=split,
         use_map_encoding=use_map_encoding
     )
     
@@ -240,7 +196,6 @@ def get_dataloader(
         batch_size=batch_size,
         shuffle=shuffle,
         num_workers=num_workers,
-        collate_fn=collate_fn,
         **kwargs
     )
     
@@ -256,8 +211,8 @@ if __name__ == "__main__":
     
     # 查看一个 batch
     for inputs, targets in train_loader:
-        print(f"输入形状: {inputs.shape}")  # (batch_size, 3 或 6)
-        print(f"目标形状: {targets.shape}")  # (batch_size, 3)
+        print(f"输入形状: {inputs.shape}")  # (batch_size, 9)
+        print(f"目标形状: {targets.shape}")  # (batch_size, 2)
         print(f"\n第一个样本:")
         print(f"  输入: {inputs[0]}")
         print(f"  目标: {targets[0]}")

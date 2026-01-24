@@ -11,7 +11,6 @@ from predictor import BaselinePredictor
 from model.dataset import get_dataloader
 from model.loss import get_loss_fn
 from model.trainer import Trainer
-from model.evaluator import Evaluator
 
 
 def train_baseline(show_scenario_errors: bool = False):
@@ -54,28 +53,17 @@ def train_baseline(show_scenario_errors: bool = False):
         save_dir=str(save_dir),
         early_stopping_patience=20,
         verbose=True,
-        coordinate_mode="relative",
-        use_onehot=True,
         compute_scenario_errors=show_scenario_errors,
-        predictor_class=BaselinePredictor,  # 新增：自动评估
-        test_loader=test_loader,             # 新增：自动评估
-        auto_evaluate=True                   # 新增：自动评估
+        predictor_class=BaselinePredictor,  # 自动评估
+        test_loader=test_loader,             # 自动评估
+        auto_evaluate=True                   # 自动评估
     )
     
     trainer.train(num_epochs=100)
     
-    # 可视化（评估已自动完成）
-    device = "cuda" if torch.cuda.is_available() else "cpu"
-    predictor = BaselinePredictor(model, device)
-    evaluator = Evaluator(predictor=predictor, device=device)
-    
-    vis_dir = Path(__file__).parent / "visualizations"
-    print(f"\n生成可视化...")
-    evaluator.visualize_predictions(output_dir=str(vis_dir))
-    
     print("\nBaseline实验完成！")
-    print(f"  模型: {save_dir / 'best_model.pth'}")
-    print(f"  可视化: {vis_dir}")
+    print(f"  模型: {save_dir / model.model_name / 'best_model.pth'}")
+    print(f"  可视化: 启动 Web 服务器查看 (python utils/ring_viewer_server.py)")
 
 
 if __name__ == "__main__":

@@ -10,7 +10,11 @@ from model.predictor import Predictor
 
 
 class DeepMLPPredictor(Predictor):
-    """深层MLP模型的预测器"""
+    """
+    深层MLP模型的预测器
+    
+    模型输出: [dx, dy] (2维，不预测半径)
+    """
     
     # 地图到One-Hot的映射
     MAP_TO_ONEHOT = {
@@ -33,7 +37,7 @@ class DeepMLPPredictor(Predictor):
             ring2_data: Ring2数据（可选）
         
         Returns:
-            (ring2_dict, ring3_dict): 原始坐标
+            (ring2_dict, ring3_dict): 原始坐标，半径使用固定值
         """
         if map_name not in self.MAP_TO_ONEHOT:
             raise ValueError(f"未知地图: {map_name}")
@@ -45,49 +49,72 @@ class DeepMLPPredictor(Predictor):
         y1 = ring1_data["y"] / self.grid_size
         r1 = ring1_data["r"] / self.grid_size
         
+        # 获取固定半径（归一化）
+        r2 = self.get_fixed_radius(map_name, 2) / self.grid_size
+        r3 = self.get_fixed_radius(map_name, 3) / self.grid_size
+        
         with torch.no_grad():
             if ring2_data is None:
                 # 场景1：只给Ring1，预测Ring2和Ring3
                 
                 # 预测Ring2
-                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
-                input1 = torch.cat([map_onehot, ring1, torch.zeros(3).to(self.device)]).unsqueeze(0)
-                output1 = self.model(input1).cpu().numpy()[0]
+                # 输入: [map(2), x1, y1, r1, r2, r3, 0, 0]
+                input1 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, 0.0, 0.0], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                output1 = self.model(input1).cpu().numpy()[0]  # [dx2, dy2]
                 
-                dx2, dy2, r2 = output1[0], output1[1], output1[2]
+                dx2, dy2 = output1[0], output1[1]
                 x2, y2 = x1 + dx2, y1 + dy2
                 
                 # 预测Ring3
-                ring2_rel = torch.tensor([dx2, dy2, r2], dtype=torch.float32).to(self.device)
-                input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
-                output2 = self.model(input2).cpu().numpy()[0]
+                # 输入: [map(2), x1, y1, r1, r2, r3, dx2, dy2]
+                input2 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, dx2, dy2], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3]
                 
-                dx3, dy3, r3 = output2[0], output2[1], output2[2]
+                dx3, dy3 = output2[0], output2[1]
                 x3, y3 = x2 + dx3, y2 + dy3
                 
                 # 反归一化
                 return (
-                    {"x": int(x2 * self.grid_size), "y": int(y2 * self.grid_size), "r": int(r2 * self.grid_size)},
-                    {"x": int(x3 * self.grid_size), "y": int(y3 * self.grid_size), "r": int(r3 * self.grid_size)}
+                    {
+                        "x": int(x2 * self.grid_size), 
+                        "y": int(y2 * self.grid_size), 
+                        "r": int(self.get_fixed_radius(map_name, 2))
+                    },
+                    {
+                        "x": int(x3 * self.grid_size), 
+                        "y": int(y3 * self.grid_size), 
+                        "r": int(self.get_fixed_radius(map_name, 3))
+                    }
                 )
             
             else:
                 # 场景2：给Ring1+Ring2，预测Ring3
                 x2 = ring2_data["x"] / self.grid_size
                 y2 = ring2_data["y"] / self.grid_size
-                r2 = ring2_data["r"] / self.grid_size
                 dx2, dy2 = x2 - x1, y2 - y1
                 
-                ring1 = torch.tensor([x1, y1, r1], dtype=torch.float32).to(self.device)
-                ring2_rel = torch.tensor([dx2, dy2, r2], dtype=torch.float32).to(self.device)
-                input2 = torch.cat([map_onehot, ring1, ring2_rel]).unsqueeze(0)
-                output2 = self.model(input2).cpu().numpy()[0]
+                # 输入: [map(2), x1, y1, r1, r2, r3, dx2, dy2]
+                input2 = torch.cat([
+                    map_onehot,
+                    torch.tensor([x1, y1, r1, r2, r3, dx2, dy2], dtype=torch.float32).to(self.device)
+                ]).unsqueeze(0)
+                output2 = self.model(input2).cpu().numpy()[0]  # [dx3, dy3]
                 
-                dx3, dy3, r3 = output2[0], output2[1], output2[2]
+                dx3, dy3 = output2[0], output2[1]
                 x3, y3 = x2 + dx3, y2 + dy3
                 
                 # 反归一化
                 return (
                     {"x": int(ring2_data["x"]), "y": int(ring2_data["y"]), "r": int(ring2_data["r"])},
-                    {"x": int(x3 * self.grid_size), "y": int(y3 * self.grid_size), "r": int(r3 * self.grid_size)}
+                    {
+                        "x": int(x3 * self.grid_size), 
+                        "y": int(y3 * self.grid_size), 
+                        "r": int(self.get_fixed_radius(map_name, 3))
+                    }
                 )

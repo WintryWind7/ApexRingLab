@@ -17,6 +17,12 @@ GRID_SIZE = 16384
 
 # 排除的地图
 EXCLUDED_MAPS = ["mp_rr_desertlands_hu"]
+
+# 固定半径（像素值）
+MAP_RADII = {
+    "mp_rr_district": {"ring1": 4930, "ring2": 2419, "ring3": 1488},
+    "mp_rr_tropic": {"ring1": 4894, "ring2": 2407, "ring3": 1284}
+}
 # ==================================================
 
 
@@ -33,8 +39,7 @@ class Evaluator:
         predictor = None,
         model: nn.Module = None,
         device: str = "cuda" if torch.cuda.is_available() else "cpu",
-        data_dir: Path = DATA_DIR,
-        coordinate_mode: str = "relative"
+        data_dir: Path = DATA_DIR
     ):
         """
         初始化评估器
@@ -44,12 +49,10 @@ class Evaluator:
             model: 模型（如果未提供predictor，则从model创建默认predictor）
             device: 设备
             data_dir: 数据目录（Path对象）
-            coordinate_mode: 坐标模式 ('absolute' 或 'relative')
         """
         self.device = device
         self.data_dir = Path(data_dir)
         self.grid_size = GRID_SIZE
-        self.coordinate_mode = coordinate_mode
         
         # 创建predictor
         if predictor is not None:
@@ -230,41 +233,32 @@ class Evaluator:
             prev_positions: 前一个Ring的位置 (N, 2) - [x_prev, y_prev]，用于计算相对位置指标
             
         Returns:
-            指标字典（center_distance 和 radius_error 为像素值，其他为归一化值）
+            指标字典（center_distance 为像素值，其他为归一化值）
         """
-        # MSE (归一化)
-        mse = ((preds - targets) ** 2).mean().item()
-        
-        # MAE (归一化)
-        mae = (preds - targets).abs().mean().item()
-        
-        # RMSE (归一化)
-        rmse = np.sqrt(mse)
-        
         # 圆心距离误差 (像素)
         center_pred = preds[:, :2]
         center_target = targets[:, :2]
         center_distance = torch.sqrt(((center_pred - center_target) ** 2).sum(dim=1)).mean().item()
         center_distance_px = center_distance * self.grid_size
         
-        # 半径误差 (像素)
-        radius_error = (preds[:, 2] - targets[:, 2]).abs().mean().item()
-        radius_error_px = radius_error * self.grid_size
-        
         # 各维度误差 (归一化)
         x_error = (preds[:, 0] - targets[:, 0]).abs().mean().item()
         y_error = (preds[:, 1] - targets[:, 1]).abs().mean().item()
-        r_error = radius_error
+        
+        # MSE/MAE/RMSE 只计算位置 (x, y)
+        position_preds = preds[:, :2]
+        position_targets = targets[:, :2]
+        mse = ((position_preds - position_targets) ** 2).mean().item()
+        mae = (position_preds - position_targets).abs().mean().item()
+        rmse = np.sqrt(mse)
         
         metrics = {
             "mse": mse,
             "mae": mae,
             "rmse": rmse,
             "center_distance": center_distance_px,  # 像素
-            "radius_error": radius_error_px,        # 像素
             "x_error": x_error,
             "y_error": y_error,
-            "r_error": r_error,
         }
         
         # 计算相对位置指标（如果提供了前一个Ring的位置）
@@ -351,50 +345,9 @@ class Evaluator:
         scenario1 = metrics.get("scenario_1_only_ring1", {})
         scenario2 = metrics.get("scenario_2_ring1_and_ring2", {})
         
-        # 收集所有半径误差
         ring2_metrics = scenario1.get("ring2_error", {})
         scenario1_ring3_metrics = scenario1.get("ring3_error", {})
         scenario2_ring3_metrics = scenario2.get("ring3_error", {})
-        
-        # 打印半径误差（按地图展示）
-        print(f"\n{'='*70}")
-        print("半径误差（理论上应为0）")
-        print(f"{'='*70}")
-        
-        # 获取按地图的指标
-        s1_r2_by_map = scenario1.get("by_map", {}).get("ring2_error", {})
-        s1_r3_by_map = scenario1.get("by_map", {}).get("ring3_error", {})
-        s2_r3_by_map = scenario2.get("by_map", {}).get("ring3_error", {})
-        
-        # 总体半径误差
-        if ring2_metrics:
-            print(f"\n场景1 - Ring2: {ring2_metrics['radius_error']:.1f} px")
-        
-        if scenario1_ring3_metrics:
-            print(f"场景1 - Ring3: {scenario1_ring3_metrics['radius_error']:.1f} px")
-        
-        if scenario2_ring3_metrics:
-            print(f"场景2 - Ring3: {scenario2_ring3_metrics['radius_error']:.1f} px")
-        
-        # 按地图展示半径误差
-        all_maps = set()
-        all_maps.update(s1_r2_by_map.keys())
-        all_maps.update(s1_r3_by_map.keys())
-        all_maps.update(s2_r3_by_map.keys())
-        
-        if all_maps:
-            print(f"\n各地图半径误差:")
-            for map_name in sorted(all_maps):
-                print(f"\n  {map_name}:")
-                
-                if map_name in s1_r2_by_map:
-                    print(f"    场景1 - Ring2: {s1_r2_by_map[map_name]['radius_error']:.1f} px")
-                
-                if map_name in s1_r3_by_map:
-                    print(f"    场景1 - Ring3: {s1_r3_by_map[map_name]['radius_error']:.1f} px")
-                
-                if map_name in s2_r3_by_map:
-                    print(f"    场景2 - Ring3: {s2_r3_by_map[map_name]['radius_error']:.1f} px")
         
         # 场景1
         print(f"\n{'='*70}")

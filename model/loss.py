@@ -622,6 +622,40 @@ class RelativeLoss(nn.Module):
         return total_loss
 
 
+class PositionCircleLoss(nn.Module):
+    """
+    位置圆形损失 - 只考虑位置，不考虑半径
+    
+    loss = alpha * center_distance
+    
+    适用于只输出 (dx, dy) 的模型（不预测半径）
+    """
+    
+    def __init__(self, alpha: float = 2.0):
+        """
+        Args:
+            alpha: 圆心距离权重
+        """
+        super().__init__()
+        self.alpha = alpha
+    
+    def forward(self, pred: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            pred: 预测值 (batch_size, 2) - [dx, dy]
+            target: 目标值 (batch_size, 2) - [dx, dy]
+            
+        Returns:
+            损失值
+        """
+        # 圆心距离 (欧氏距离)
+        center_distance = torch.sqrt(((pred - target) ** 2).sum(dim=1) + 1e-8)
+        
+        # 加权
+        loss = self.alpha * center_distance.mean()
+        return loss
+
+
 def get_loss_fn(loss_type: str = "mse", **kwargs):
     """
     获取损失函数
