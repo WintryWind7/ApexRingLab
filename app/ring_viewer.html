@@ -1,0 +1,758 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Apex 毒圈可视化工具</title>
+    <style>
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background: #1a1a1a;
+            color: #fff;
+            padding: 10px;
+            overflow: hidden;
+        }
+
+        .container {
+            display: flex;
+            height: calc(100vh - 20px);
+            gap: 10px;
+        }
+
+        .left-panel {
+            width: 280px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .right-panel {
+            width: 280px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .center-panel {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+            min-width: 0;
+        }
+
+        h1 {
+            font-size: 20px;
+            margin: 0;
+            padding: 12px;
+            background: #2a2a2a;
+            border-radius: 8px;
+            color: #ff6b35;
+            text-align: center;
+        }
+
+        .controls {
+            background: #2a2a2a;
+            padding: 12px;
+            border-radius: 8px;
+            display: flex;
+            flex-direction: column;
+            gap: 10px;
+        }
+
+        .control-group {
+            display: flex;
+            flex-direction: column;
+            gap: 5px;
+        }
+
+        label {
+            font-weight: 500;
+            font-size: 15px;
+            color: #aaa;
+        }
+
+        select, button {
+            padding: 10px 14px;
+            border: none;
+            border-radius: 5px;
+            font-size: 15px;
+            cursor: pointer;
+            transition: all 0.2s;
+            width: 100%;
+        }
+
+        select {
+            background: #3a3a3a;
+            color: #fff;
+        }
+
+        button {
+            background: #ff6b35;
+            color: #fff;
+            font-weight: 500;
+        }
+
+        button:hover {
+            background: #ff8555;
+        }
+
+        button:active {
+            transform: scale(0.98);
+        }
+
+        button:disabled {
+            background: #555;
+            cursor: not-allowed;
+            opacity: 0.5;
+        }
+
+        .button-group {
+            display: flex;
+            gap: 6px;
+        }
+
+        .button-group button {
+            flex: 1;
+        }
+
+        .info {
+            background: #2a2a2a;
+            padding: 14px;
+            border-radius: 8px;
+            font-size: 14px;
+            line-height: 1.6;
+            flex: 1;
+            overflow-y: auto;
+        }
+
+        .info-item {
+            margin-bottom: 12px;
+            padding-bottom: 12px;
+            border-bottom: 1px solid #3a3a3a;
+        }
+
+        .info-item:last-child {
+            border-bottom: none;
+            margin-bottom: 0;
+            padding-bottom: 0;
+        }
+
+        .info-label {
+            color: #888;
+            font-size: 13px;
+        }
+
+        .info-value {
+            color: #fff;
+            margin-top: 4px;
+            font-size: 16px;
+        }
+
+        .canvas-container {
+            background: #2a2a2a;
+            border-radius: 8px;
+            padding: 10px;
+            flex: 1;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            overflow: hidden;
+        }
+
+        canvas {
+            border: 2px solid #3a3a3a;
+            cursor: crosshair;
+            image-rendering: crisp-edges;
+        }
+
+        canvas.dragging {
+            cursor: grabbing;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+            font-size: 16px;
+            color: #ff6b35;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- 左侧面板：地图配置 -->
+        <div class="left-panel">
+            <h1>🗺️ 地图配置</h1>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label>地图</label>
+                    <select id="mapSelect"></select>
+                </div>
+
+                <div class="button-group">
+                    <button onclick="zoomIn()">放大</button>
+                    <button onclick="zoomOut()">缩小</button>
+                </div>
+
+                <button onclick="clearRing()">清除毒圈</button>
+            </div>
+
+            <div class="info" id="leftInfo">
+                <div class="info-item">
+                    <div class="info-label">缩放</div>
+                    <div class="info-value" id="zoomInfo">100%</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">Ring 1</div>
+                    <div class="info-value" id="ring1Info">未放置</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">Ring 2</div>
+                    <div class="info-value" id="ring2Info">未放置</div>
+                </div>
+            </div>
+        </div>
+
+        <!-- 中间面板：地图显示 -->
+        <div class="center-panel">
+            <div class="canvas-container">
+                <canvas id="mapCanvas"></canvas>
+            </div>
+        </div>
+
+        <!-- 右侧面板：预测功能 -->
+        <div class="right-panel">
+            <h1>🎯 预测功能</h1>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label>模型</label>
+                    <select id="modelSelect">
+                        <!-- 动态加载 -->
+                    </select>
+                </div>
+            </div>
+
+            <div class="controls">
+                <div class="control-group">
+                    <label>选择等级</label>
+                    <select id="ringLevel">
+                        <option value="0">Ring 1</option>
+                        <option value="1">Ring 2</option>
+                    </select>
+                </div>
+
+                <button onclick="predict()" id="predictBtn" disabled>预测</button>
+            </div>
+
+            <div class="info" id="rightInfo">
+                <div class="info-item">
+                    <div class="info-label">状态</div>
+                    <div class="info-value" id="statusInfo">等待输入...</div>
+                </div>
+                <div class="info-item">
+                    <div class="info-label">预测结果</div>
+                    <div class="info-value" id="predictInfo" style="white-space: pre-line;">-</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // 全局变量
+        const COORD_SIZE = 16384;
+        const IMAGE_SIZE = 4096;
+        const COORD_TO_IMAGE_SCALE = IMAGE_SIZE / COORD_SIZE;
+
+        let maps = [];
+        let currentMap = null;
+        let currentRingLevel = 0;
+        let zoomScale = 1.0;
+        let mapImage = null;
+        let ring1Data = null; // Ring 1 数据 {x, y, radius}
+        let ring2Data = null; // Ring 2 数据 {x, y, radius}
+        let predictedRing2Data = null; // 预测的 Ring 2
+        let predictedRing3Data = null; // 预测的 Ring 3
+
+        // 地图偏移量（地图在 Canvas 内的绘制位置）
+        let offsetX = 0;
+        let offsetY = 0;
+        let isDragging = false;
+        let hasMoved = false;  // 标记是否发生了拖动
+        let dragStartX = 0;
+        let dragStartY = 0;
+        let lastOffsetX = 0;
+        let lastOffsetY = 0;
+
+        const canvas = document.getElementById('mapCanvas');
+        const ctx = canvas.getContext('2d');
+        const canvasContainer = document.querySelector('.canvas-container');
+        const mapSelect = document.getElementById('mapSelect');
+        const modelSelect = document.getElementById('modelSelect');
+        const ringLevelSelect = document.getElementById('ringLevel');
+        const predictBtn = document.getElementById('predictBtn');
+        
+        // 信息显示元素
+        const zoomInfo = document.getElementById('zoomInfo');
+        const ring1Info = document.getElementById('ring1Info');
+        const ring2Info = document.getElementById('ring2Info');
+        const statusInfo = document.getElementById('statusInfo');
+        const predictInfo = document.getElementById('predictInfo');
+
+        // 初始化
+        async function init() {
+            try {
+                // 加载地图列表
+                const mapsResponse = await fetch('/api/maps');
+                const mapsData = await mapsResponse.json();
+                maps = mapsData.maps;
+
+                // 填充地图选择
+                maps.forEach((map, index) => {
+                    const option = document.createElement('option');
+                    option.value = index;
+                    option.textContent = map.name;
+                    mapSelect.appendChild(option);
+                });
+
+                // 加载模型列表
+                const modelsResponse = await fetch('/api/models');
+                const modelsData = await modelsResponse.json();
+                modelSelect.innerHTML = ''; // 清空默认选项
+                modelsData.models.forEach((model) => {
+                    const option = document.createElement('option');
+                    option.value = model.id;
+                    option.textContent = model.name;
+                    modelSelect.appendChild(option);
+                });
+
+                // 加载默认地图
+                await loadMap(0);
+
+                // 事件监听
+                mapSelect.addEventListener('change', (e) => loadMap(parseInt(e.target.value)));
+                ringLevelSelect.addEventListener('change', (e) => {
+                    currentRingLevel = parseInt(e.target.value);
+                });
+
+                canvas.addEventListener('mousedown', onMouseDown);
+                canvas.addEventListener('mousemove', onMouseMove);
+                canvas.addEventListener('mouseup', onMouseUp);
+                canvas.addEventListener('mouseleave', onMouseUp);
+                canvas.addEventListener('wheel', onCanvasWheel, { passive: false });
+
+            } catch (error) {
+                statusInfo.textContent = '错误: ' + error.message;
+            }
+        }
+
+        // 加载地图
+        async function loadMap(index) {
+            currentMap = maps[index];
+            ring1Data = null;
+            ring2Data = null;
+            predictedRing2Data = null;
+            predictedRing3Data = null;
+
+            statusInfo.textContent = '加载地图中...';
+            predictInfo.textContent = '-';
+
+            const img = new Image();
+            img.onload = () => {
+                mapImage = img;
+                
+                // 设置 Canvas 尺寸为容器尺寸
+                const containerWidth = canvasContainer.clientWidth - 20;
+                const containerHeight = canvasContainer.clientHeight - 20;
+                canvas.width = containerWidth;
+                canvas.height = containerHeight;
+                
+                // 计算初始缩放以适应容器
+                const scaleX = containerWidth / IMAGE_SIZE;
+                const scaleY = containerHeight / IMAGE_SIZE;
+                zoomScale = Math.min(scaleX, scaleY, 1.0);
+                
+                // 居中显示
+                offsetX = (containerWidth - IMAGE_SIZE * zoomScale) / 2;
+                offsetY = (containerHeight - IMAGE_SIZE * zoomScale) / 2;
+                
+                updateDisplay();
+                updateInfo();
+            };
+            img.onerror = () => {
+                statusInfo.textContent = '错误: 无法加载地图';
+            };
+            img.src = currentMap.path;
+        }
+
+        // 限制偏移量在边界内
+        function clampOffset() {
+            const mapWidth = IMAGE_SIZE * zoomScale;
+            const mapHeight = IMAGE_SIZE * zoomScale;
+            
+            // 如果地图小于 Canvas，居中显示
+            if (mapWidth <= canvas.width) {
+                offsetX = (canvas.width - mapWidth) / 2;
+            } else {
+                // 限制不能拖出边界
+                const minX = canvas.width - mapWidth;
+                const maxX = 0;
+                offsetX = Math.max(minX, Math.min(maxX, offsetX));
+            }
+            
+            if (mapHeight <= canvas.height) {
+                offsetY = (canvas.height - mapHeight) / 2;
+            } else {
+                const minY = canvas.height - mapHeight;
+                const maxY = 0;
+                offsetY = Math.max(minY, Math.min(maxY, offsetY));
+            }
+        }
+
+        // 绘制单个毒圈
+        function drawRing(ringData, color, lineWidth = 3) {
+            const centerX = offsetX + ringData.x * COORD_TO_IMAGE_SCALE * zoomScale;
+            const centerY = offsetY + ringData.y * COORD_TO_IMAGE_SCALE * zoomScale;
+            const radius = ringData.radius * COORD_TO_IMAGE_SCALE * zoomScale;
+
+            // 绘制圆圈
+            ctx.strokeStyle = color;
+            ctx.lineWidth = lineWidth;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // 绘制中心点（小一点）
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // 绘制预测的毒圈（使用 r 字段）
+        function drawPredictedRing(ringData, color, lineWidth = 3) {
+            const centerX = offsetX + ringData.x * COORD_TO_IMAGE_SCALE * zoomScale;
+            const centerY = offsetY + ringData.y * COORD_TO_IMAGE_SCALE * zoomScale;
+            const radius = ringData.r * COORD_TO_IMAGE_SCALE * zoomScale;
+
+            // 绘制圆圈
+            ctx.strokeStyle = color;
+            ctx.lineWidth = lineWidth;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // 绘制中心点（小一点）
+            ctx.fillStyle = color;
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, 3, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // 更新显示
+        function updateDisplay() {
+            if (!mapImage) return;
+
+            // 清空画布
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            const mapWidth = IMAGE_SIZE * zoomScale;
+            const mapHeight = IMAGE_SIZE * zoomScale;
+
+            // 限制偏移量
+            clampOffset();
+
+            // 绘制地图（使用偏移量）
+            ctx.drawImage(mapImage, offsetX, offsetY, mapWidth, mapHeight);
+
+            // 绘制 Ring 1（白色，细线）
+            if (ring1Data) {
+                drawRing(ring1Data, '#ffffff', 2);
+            }
+
+            // 绘制 Ring 2（白色，细线）
+            if (ring2Data) {
+                drawRing(ring2Data, '#ffffff', 2);
+            }
+
+            // 绘制预测的毒圈（黄色）
+            if (predictedRing2Data) {
+                drawPredictedRing(predictedRing2Data, '#ffff00', 3);
+            }
+            
+            if (predictedRing3Data) {
+                drawPredictedRing(predictedRing3Data, '#ffff00', 3);
+            }
+        }
+
+        // 鼠标按下
+        function onMouseDown(e) {
+            if (e.button === 0) { // 左键
+                dragStartX = e.clientX;
+                dragStartY = e.clientY;
+                lastOffsetX = offsetX;
+                lastOffsetY = offsetY;
+                hasMoved = false;
+                isDragging = true;
+            }
+        }
+
+        // 鼠标移动
+        function onMouseMove(e) {
+            if (isDragging) {
+                const dx = e.clientX - dragStartX;
+                const dy = e.clientY - dragStartY;
+                
+                // 判断是否移动了足够的距离（超过5像素才算拖动）
+                if (Math.abs(dx) > 5 || Math.abs(dy) > 5) {
+                    hasMoved = true;
+                    canvas.classList.add('dragging');
+                    offsetX = lastOffsetX + dx;
+                    offsetY = lastOffsetY + dy;
+                    updateDisplay();
+                }
+            }
+        }
+
+        // 鼠标释放
+        function onMouseUp(e) {
+            if (isDragging) {
+                isDragging = false;
+                canvas.classList.remove('dragging');
+                
+                // 如果没有移动，视为点击
+                if (!hasMoved && e.button === 0) {
+                    placeRing(e);
+                }
+            }
+        }
+
+        // 放置毒圈
+        function placeRing(e) {
+            if (!mapImage || !currentMap) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const canvasX = e.clientX - rect.left;
+            const canvasY = e.clientY - rect.top;
+
+            // 转换为地图上的像素坐标
+            const mapX = (canvasX - offsetX) / zoomScale;
+            const mapY = (canvasY - offsetY) / zoomScale;
+
+            // 检查是否在地图范围内
+            if (mapX < 0 || mapX > IMAGE_SIZE || mapY < 0 || mapY > IMAGE_SIZE) {
+                return;
+            }
+
+            // 转换为游戏坐标
+            const coordX = Math.floor(mapX / COORD_TO_IMAGE_SCALE);
+            const coordY = Math.floor(mapY / COORD_TO_IMAGE_SCALE);
+
+            // 获取当前毒圈半径
+            const radius = currentMap.rings[currentRingLevel];
+
+            // 根据当前等级保存到对应变量
+            if (currentRingLevel === 0) {
+                ring1Data = { x: coordX, y: coordY, radius: radius };
+            } else if (currentRingLevel === 1) {
+                ring2Data = { x: coordX, y: coordY, radius: radius };
+            }
+
+            updateDisplay();
+            updateInfo();
+        }
+
+        // 鼠标滚轮缩放（以鼠标为中心）
+        function onCanvasWheel(e) {
+            e.preventDefault();
+            if (!mapImage) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            // 计算鼠标在地图上的位置（缩放前）
+            const mapX = (mouseX - offsetX) / zoomScale;
+            const mapY = (mouseY - offsetY) / zoomScale;
+
+            const oldScale = zoomScale;
+            const delta = e.deltaY < 0 ? 0.1 : -0.1;
+            zoomScale = Math.max(0.1, Math.min(3.0, zoomScale + delta));
+
+            // 调整偏移量，使鼠标位置保持不变
+            offsetX = mouseX - mapX * zoomScale;
+            offsetY = mouseY - mapY * zoomScale;
+
+            updateDisplay();
+            updateInfo();
+        }
+
+        // 放大（以中心缩放）
+        function zoomIn() {
+            if (zoomScale < 3.0) {
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                
+                const mapX = (centerX - offsetX) / zoomScale;
+                const mapY = (centerY - offsetY) / zoomScale;
+                
+                zoomScale = Math.min(3.0, zoomScale + 0.1);
+                
+                offsetX = centerX - mapX * zoomScale;
+                offsetY = centerY - mapY * zoomScale;
+                
+                updateDisplay();
+                updateInfo();
+            }
+        }
+
+        // 缩小（以中心缩放）
+        function zoomOut() {
+            if (zoomScale > 0.1) {
+                const centerX = canvas.width / 2;
+                const centerY = canvas.height / 2;
+                
+                const mapX = (centerX - offsetX) / zoomScale;
+                const mapY = (centerY - offsetY) / zoomScale;
+                
+                zoomScale = Math.max(0.1, zoomScale - 0.1);
+                
+                offsetX = centerX - mapX * zoomScale;
+                offsetY = centerY - mapY * zoomScale;
+                
+                updateDisplay();
+                updateInfo();
+            }
+        }
+
+        // 清除毒圈
+        function clearRing() {
+            ring1Data = null;
+            ring2Data = null;
+            predictedRing2Data = null;
+            predictedRing3Data = null;
+            predictInfo.textContent = '-';
+            updateDisplay();
+            updateInfo();
+        }
+
+        // 更新信息显示
+        function updateInfo() {
+            if (!currentMap) return;
+
+            // 更新缩放信息
+            zoomInfo.textContent = `${Math.round(zoomScale * 100)}%`;
+            
+            // 更新 Ring 1 信息
+            if (ring1Data) {
+                ring1Info.textContent = `(${ring1Data.x}, ${ring1Data.y})`;
+            } else {
+                ring1Info.textContent = '未放置';
+            }
+            
+            // 更新 Ring 2 信息
+            if (ring2Data) {
+                ring2Info.textContent = `(${ring2Data.x}, ${ring2Data.y})`;
+            } else {
+                ring2Info.textContent = '未放置';
+            }
+
+            // 更新预测按钮状态（只需要 Ring 1 即可预测）
+            if (ring1Data) {
+                predictBtn.disabled = false;
+                if (ring2Data) {
+                    statusInfo.textContent = '可预测 Ring 3';
+                } else {
+                    statusInfo.textContent = '可预测 Ring 2 和 Ring 3';
+                }
+            } else {
+                predictBtn.disabled = true;
+                statusInfo.textContent = '请先放置 Ring 1';
+            }
+        }
+
+        // 预测函数
+        async function predict() {
+            if (!ring1Data || !currentMap) return;
+            
+            statusInfo.textContent = '预测中...';
+            predictInfo.textContent = '-';
+            
+            try {
+                const requestData = {
+                    model_id: modelSelect.value,
+                    map_id: currentMap.id,
+                    ring1: {
+                        x: ring1Data.x,
+                        y: ring1Data.y
+                    }
+                };
+                
+                // 如果有 Ring 2，添加到请求中
+                if (ring2Data) {
+                    requestData.ring2 = {
+                        x: ring2Data.x,
+                        y: ring2Data.y
+                    };
+                }
+                
+                const response = await fetch('/api/predict', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json'
+                    },
+                    body: JSON.stringify(requestData)
+                });
+                
+                if (!response.ok) {
+                    throw new Error(`预测失败: ${response.status}`);
+                }
+                
+                const result = await response.json();
+                
+                // 显示预测结果
+                if (result.mode === 'ring3' && result.ring3) {
+                    statusInfo.textContent = '预测完成';
+                    predictInfo.innerHTML = `Ring 3: (${result.ring3.x}, ${result.ring3.y}), r=${result.ring3.r}`;
+                    
+                    // 保存预测结果并绘制
+                    predictedRing2Data = null;
+                    predictedRing3Data = result.ring3;
+                    updateDisplay();
+                    
+                } else if (result.mode === 'ring2_ring3') {
+                    statusInfo.textContent = '预测完成';
+                    let infoLines = [];
+                    
+                    if (result.ring2) {
+                        infoLines.push(`Ring 2: (${result.ring2.x}, ${result.ring2.y}), r=${result.ring2.r}`);
+                        predictedRing2Data = result.ring2;
+                    }
+                    
+                    if (result.ring3) {
+                        infoLines.push(`Ring 3: (${result.ring3.x}, ${result.ring3.y}), r=${result.ring3.r}`);
+                        predictedRing3Data = result.ring3;
+                    }
+                    
+                    predictInfo.innerHTML = infoLines.join('<br>');
+                    updateDisplay();
+                }
+                
+            } catch (error) {
+                statusInfo.textContent = '预测失败';
+                predictInfo.textContent = error.message;
+                console.error('预测错误:', error);
+            }
+        }
+
+        // 启动
+        init();
+    </script>
+</body>
+</html>
